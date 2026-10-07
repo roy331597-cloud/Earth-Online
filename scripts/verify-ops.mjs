@@ -19,7 +19,7 @@
 //   ㉘ 成就引擎（命名、补发、只增不减、雾里不点名）
 //   ㉙ 进化树引擎（点亮、回填、掀雾、统计）
 //   ㉚ 终局目标引擎（点亮、重算、圣殿视图）
-//   ㉛ 出厂封装（PWA 清单 / iOS meta / Docker / nginx / compose）
+//   ㉛ 出厂封装（PWA 清单 / iOS meta / Docker / nginx / compose / README / 裸机配置）
 //   ㉜ 出厂清场（空档：结构完整 / 引用隔离 / 全空清单 / 漏斗空转两遍）
 //
 // ①–⑨ 验的是**写**（状态怎么流转）；⑩–⑬ 验的是**读**（selector 从状态里读出什么）。
@@ -108,6 +108,11 @@
 //    viewport-fit=cover 掉了，灵动岛那一条会盖住 HUD；
 //    顺手添一条 Permissions-Policy: geolocation=()，世界页的定位就静默失效。
 //    它们全都要等"真的装到手机主屏幕上"才暴露 —— 所以在离开这台机器之前先钉住。
+//
+//    发布之后又补了两件：README（仓库的门面 —— 说清这是什么、怎么跑、怎么部署）
+//    与「没有 Docker」的裸机配置 deploy/nginx-bare.conf。后者与容器版 nginx.conf
+//    是同一套策略的两个落点，所以这一节还钉了一条**防漂移**：两份配置的安全头
+//    与缓存三档必须逐条同款 —— 只改一份，闸门会响。
 //
 // ㉜ 是出厂清场：PO 裁定"开发期为验收造的那批测试内容全部清空"。
 //    清的姿势是分家 —— mockState 继续当夹具（本脚本近千条断言长在上面），
@@ -3885,6 +3890,31 @@ try {
   truthy('部署文档：手机安装步骤（添加到主屏幕）', deploy.includes('添加到主屏幕'));
   truthy('部署文档：HTTPS 是硬前提（PWA 装不上，九成先查这一条）',
     deploy.includes('HTTPS'));
+
+  // —— ⑨ README 与「没有 Docker」的裸机路径（PO 的服务器没有 Docker） ——
+  const readme = readText('README.md');
+  truthy('README：说了这是什么', readme.includes('地球OL'));
+  truthy('README：给了本机上手（dev / build 都在）',
+    readme.includes('npm run dev') && readme.includes('npm run build'));
+  truthy('README：指向部署文档与裸机配置',
+    readme.includes('docs/DEPLOY.md') && readme.includes('deploy/nginx-bare.conf'));
+  const bare = readText('deploy/nginx-bare.conf');
+  truthy('裸机配置：SPA 回退在场', bare.includes('try_files $uri $uri/ /index.html;'));
+  for (const [label, needle] of [
+    ['禁嵌入（X-Frame-Options: DENY）', 'X-Frame-Options "DENY"'],
+    ['禁 MIME 嗅探', 'X-Content-Type-Options "nosniff"'],
+    ['Referrer-Policy', 'Referrer-Policy "strict-origin-when-cross-origin"'],
+    ['外壳不缓存', 'location = /index.html'],
+    ['sw.js 不缓存', 'location = /sw.js'],
+    ['指纹资源长缓存', 'expires 1y;'],
+  ]) {
+    truthy(`防漂移：裸机配置与容器版同款 —— ${label}`, bare.includes(needle) && nginx.includes(needle));
+  }
+  const bareCode = bare.split('\n').filter((l) => !l.trim().startsWith('#')).join('\n');
+  truthy('裸机配置也**故意没有** Permissions-Policy（正文里没有；注释里提过不算）',
+    !bareCode.includes('Permissions-Policy:'));
+  truthy('部署文档：无 Docker 路径在场（裸机配置 + certbot）',
+    deploy.includes('deploy/nginx-bare.conf') && deploy.includes('certbot'));
 
   // -------------------------------------------------------------------------
   console.log('\n【㉜ 出厂清场：空档（生产初始档）】');
