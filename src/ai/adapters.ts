@@ -38,6 +38,7 @@
 // ⚠️ 纯函数：不读时钟、不碰存档、不写日志。可以脱离 React 与网络单独跑断言。
 // ============================================================================
 
+import { GOAL_IDS } from '@/ai/schemas';
 import { getClass } from '@/data/catalog/classes';
 import { MILESTONE_TAG_VOCABULARY } from '@/data/catalog/endgame';
 import {
@@ -63,6 +64,7 @@ import type {
   ContactId,
   Difficulty,
   DispatcherDecision,
+  GoalId,
   NetworkAdviceOutput,
   Quest,
   QuestDraft,
@@ -84,6 +86,40 @@ const MIN_DRAFTS = 2;
 export const LEGAL_MILESTONE_TAGS: ReadonlySet<string> = new Set(
   MILESTONE_TAG_VOCABULARY.map((v) => v.tag),
 );
+
+/** 合法的终极目标 id（五个）。唯一定义处在 schemas.ts 的 GOAL_IDS */
+export const LEGAL_GOAL_IDS: ReadonlySet<string> = new Set(GOAL_IDS);
+
+/**
+ * 把模型写的 `linkedGoalIds` 擦到五个真实 id 上 —— **丢弃不认得的，其余照用**。
+ *
+ * 这一层以前不存在，因为 schema 的 enum 直接硬拒。2026-10-07 线上事故：
+ * 模型把「全球通行海外身份」写成自造的 OVERSEAS_IDENTITY —— 语义完全对得上，
+ * 只是名字不在册 —— enum 当场把**整次调度**拒掉，玩家看到一条吓人的提示，
+ * 而那次调用里其余的内容（路由、拟建的新职业线、信心度）全部连坐作废。
+ *
+ * 先例就在本文件里：adaptSolverReport 对编造的 contactId「已丢弃」，
+ * adaptArbiterVerdict 对词表外的 milestoneTags 过滤 —— **内容层的越界该在
+ * 适配层被丢掉并留痕，而不是把整单作废**。三个消费点（questDraft /
+ * proposedClass / dispatcher 顶层）的 enum 因此都撤了（见 schemas.GOAL_IDS），
+ * 认不认得由这里说了算。
+ */
+const filterGoalIds = (ids: readonly string[], where: string): Adapted<GoalId[]> => {
+  const corrections: string[] = [];
+  const kept: GoalId[] = [];
+  const dropped: string[] = [];
+  for (const raw of ids) {
+    const id = raw.trim();
+    if (LEGAL_GOAL_IDS.has(id)) kept.push(id as GoalId);
+    else dropped.push(id);
+  }
+  if (dropped.length > 0) {
+    corrections.push(
+      `${where}：目标 id ${dropped.map((d) => `「${d}」`).join('')} 不在终极目标目录内（那五个），已丢弃`,
+    );
+  }
+  return { value: kept, corrections };
+};
 
 const clip = (text: string, n: number): string => {
   const t = text.trim();
@@ -123,6 +159,33 @@ export const resolveRoutedClass = (
   return { value: raw, corrections };
 };
 
+/**
+ * 调度决定里的目标 id 过一遍目录（2026-10-07 事故的正面入口，见 filterGoalIds）。
+ *
+ * 现场原样：模型写 `linkedGoalIds: ["GEO_INDEPENDENT_WORK", "OVERSEAS_IDENTITY"]`，
+ * 第二个是它自造的。旧版 enum 把一个词的问题放大成整次调度的失败。
+ * 现在的规矩：不认得的丢弃、留痕，其余照常使用；一个都不认得时留下空数组 ——
+ * dispatcher 的 linkedGoalIds 只是给下游的提示材料，空数组是诚实的状态。
+ */
+export const sanitizeDispatcherDecision = (decision: DispatcherDecision): Adapted<DispatcherDecision> => {
+  const corrections: string[] = [];
+
+  const top = filterGoalIds(decision.linkedGoalIds, '调度决定的 linkedGoalIds');
+  corrections.push(...top.corrections);
+
+  let proposed = decision.proposedClass;
+  if (proposed) {
+    const inner = filterGoalIds(proposed.linkedGoalIds, `拟建职业线「${proposed.displayName}」的 linkedGoalIds`);
+    corrections.push(...inner.corrections);
+    if (inner.value.length !== proposed.linkedGoalIds.length) {
+      proposed = { ...proposed, linkedGoalIds: inner.value };
+    }
+  }
+
+  if (corrections.length === 0) return { value: decision, corrections };
+  return { value: { ...decision, linkedGoalIds: top.value, proposedClass: proposed }, corrections };
+};
+
 // ---------------------------------------------------------------------------
 // 2. Class Agent（+ 可选 Chain Reviewer）→ ForgeOutput
 // ---------------------------------------------------------------------------
@@ -130,7 +193,7 @@ export const resolveRoutedClass = (
 /**
  * 草稿的**结构卫生**。
  *
- * 三件事，顺序不能换：
+ * 五件事，顺序不能换：
  *   ① **tempId 去重** —— 见文件头。撞名的后来者改名而不是被丢弃：
  *      丢的是"一条真实存在的任务"，改名只损失一个标识符。
  *      而它原本的 `prerequisiteTempIds` 由 `buildQuests` 兜底（指不到就丢），
@@ -140,6 +203,12 @@ export const resolveRoutedClass = (
  *      作废划算得多，代价只是记一笔。
  *   ③ **`prerequisiteTempIds` 指不到的一律清空** —— `buildQuests` 也会丢，
  *      但在这里丢掉能让"模型给了一条悬空依赖"成为一条可见的 correction。
+ *   ④ **`linkedGoalIds` 里目录外的 id 丢弃留痕**（2026-10-07 事故，见 filterGoalIds）——
+ *      以前是 schema enum 把整次调用拒掉，现在只擦掉那一个词。
+ *   ⑤ **`reward.attributePoints` 的 null 擦成"没有这一格"** —— 输出纪律教模型
+ *      "缺失的可选项用 null"，这是它最规矩的写法；落库形状里却没有"null 点数"
+ *      这一说。schema 已经收下这个 null（见 rewardSchema.attributePoints 注释），
+ *      收下之后在这里擦干净，而不是把提示词的规矩当错误去拒。
  */
 const sanitizeDrafts = (drafts: QuestDraft[]): Adapted<QuestDraft[]> => {
   const corrections: string[] = [];
@@ -154,7 +223,17 @@ const sanitizeDrafts = (drafts: QuestDraft[]): Adapted<QuestDraft[]> => {
     const title = clip(d.title, 28);
     if (title !== d.title.trim()) corrections.push(`任务标题超过 28 字，已截断：「${title}」`);
 
-    return { ...d, tempId, title };
+    const goals = filterGoalIds(d.linkedGoalIds, `任务「${title}」的 linkedGoalIds`);
+    corrections.push(...goals.corrections);
+
+    // 用 delete 而不是赋 undefined：让"没有这一格"在结构上真的是没有
+    let reward = d.reward;
+    if ((d.reward as { attributePoints?: unknown }).attributePoints === null) {
+      reward = { ...d.reward };
+      delete (reward as { attributePoints?: unknown }).attributePoints;
+    }
+
+    return { ...d, tempId, title, linkedGoalIds: goals.value, reward };
   });
 
   const ids = new Set(fixed.map((d) => d.tempId));

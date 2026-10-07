@@ -54,6 +54,16 @@ export interface ChatSuccess {
   latencyMs: number;
   tokensIn: number;
   tokensOut: number;
+  /**
+   * 服务端给的停止原因（'stop' | 'length' | 'content_filter' | …），有才带。
+   *
+   * 空内容那条路径早就用它说人话（describeEmptyContent）；但"有内容、内容
+   * 却不能用"（invalid_json / schema_violation）以前拿不到它，消息里只剩
+   * 一句看不懂的 JSON 报错。2026-10-07 的存档审计正是靠"输出恰好断在 1976 字"
+   * 这种旁证才排除了截断 —— 而 finish_reason 是**直接证据**：'length' 就是
+   * "被输出上限截断了"，处方（加预算）与"模型自己写歪了"（修解析）完全不同。
+   */
+  finishReason?: string;
 }
 
 export interface ChatFailure {
@@ -300,12 +310,14 @@ export const chatCompletion = async (
         continue;
       }
 
+      const finishReason = parsed.choices?.[0]?.finish_reason;
       return {
         ok: true,
         content,
         latencyMs,
         tokensIn: typeof parsed.usage?.prompt_tokens === 'number' ? parsed.usage.prompt_tokens : 0,
         tokensOut: typeof parsed.usage?.completion_tokens === 'number' ? parsed.usage.completion_tokens : 0,
+        ...(typeof finishReason === 'string' ? { finishReason } : {}),
       };
     } catch (err) {
       const latencyMs = Math.max(0, Math.round(now() - startedAt));

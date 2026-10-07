@@ -45,7 +45,23 @@ const arr = (items: JsonSchema, minItems = 0, maxItems = 12): JsonSchema => ({
 // 公共片段
 // ---------------------------------------------------------------------------
 
-const GOAL_IDS = ['A9_ASSETS', 'GLOBAL_MOBILITY', 'PRIVATE_LAB', 'GEO_INDEPENDENT_WORK', 'SOULMATE'] as const;
+/**
+ * 五个终极目标的合法 id。
+ *
+ * ⚠️ 它**不再出现在任何 schema 的 enum 上**（2026-10-07 线上事故）：
+ *    模型把「全球通行海外身份」写成自造的 OVERSEAS_IDENTITY —— 语义全对、
+ *    名字不在册，enum 当场把**整次调度**拒掉（「取值不在允许范围内」），
+ *    而那一趟里其余的内容（路由、拟建的新职业线、信心度）全部连坐作废，
+ *    玩家拿到一条吓人的提示，实际损失与提示完全不成比例。
+ *    先例是 adaptSolverReport 对编造 contactId、adaptArbiterVerdict 对词表外
+ *    里程碑标签的处理：**内容层的越界该在适配层被丢弃并留痕，而不是把整单作废**。
+ *    所以三个消费点（questDraft / proposedClass / dispatcher 顶层）的 enum 都撤了，
+ *    校验只保证"是一串不长的字符串"，认不认得由 adapters 的 filterGoalIds 说了算。
+ *
+ * 这个数组仍是"哪五个是合法的"的唯一定义处 —— 提示词的对照表（00-shared-context
+ * 第一节）与适配层的过滤器都从它出发。改这里就是改全局。
+ */
+export const GOAL_IDS = ['A9_ASSETS', 'GLOBAL_MOBILITY', 'PRIVATE_LAB', 'GEO_INDEPENDENT_WORK', 'SOULMATE'] as const;
 const ATTRIBUTE_KEYS = ['vit', 'int', 'foc', 'cha', 'wil', 'cap'] as const;
 const QUEST_TYPES = ['main', 'side', 'special', 'milestone'] as const;
 const PROOF_KINDS = ['text', 'link', 'number', 'screenshot'] as const;
@@ -58,6 +74,12 @@ const rewardSchema: JsonSchema = {
     attributePoints: {
       type: 'object',
       properties: Object.fromEntries(ATTRIBUTE_KEYS.map((k) => [k, num(0, 2)])),
+      // 输出纪律第 2 条教模型"缺失的可选项用 `null`"（00-shared-context 第四节），
+      // `attributePoints: null` 就是它最规矩的写法。旧 schema 不认这个 null，
+      // 把一份内容完好的草稿整单拒掉（2026-10-07 存档审计的第 4 条调用死在
+      // 这一格上：「期望对象，收到 null」）。收下它，落库前由 adapters 擦成
+      // "没有这一格"——提示词与 schema 之间不该有互相打架的两套纪律。
+      nullable: true,
     },
   },
   required: ['exp'],
@@ -83,7 +105,8 @@ const questDraftSchema: JsonSchema = {
     },
     reward: rewardSchema,
     outcomeHints: arr(str(60), 1, 4),
-    linkedGoalIds: arr({ type: 'string', enum: GOAL_IDS }, 0, 5),
+    // 目标 id 不设 enum：认不认得出由 adapters.filterGoalIds 判定（见 GOAL_IDS 注释）
+    linkedGoalIds: arr(str(40), 0, 5),
     linkedAttributes: arr({ type: 'string', enum: ATTRIBUTE_KEYS }, 1, 4),
     prerequisiteTempIds: arr(str(40), 0, 8),
     dueHintDays: { ...{ type: 'integer', minimum: 1, maximum: 90 }, nullable: true },
@@ -134,7 +157,8 @@ const dispatcherDecisionSchema: JsonSchema = {
         creed: str(40),
         domains: arr(str(40), 2, 10),
         personaBrief: str(160),
-        linkedGoalIds: arr({ type: 'string', enum: GOAL_IDS }, 1, 5),
+        // 同上：enum 已撤，合法性由适配层过滤（见 GOAL_IDS 注释）
+        linkedGoalIds: arr(str(40), 1, 5),
         attributeWeights: {
           type: 'object',
           properties: Object.fromEntries(ATTRIBUTE_KEYS.map((k) => [k, num(0, 1)])),
@@ -170,7 +194,8 @@ const dispatcherDecisionSchema: JsonSchema = {
       },
       required: ['kind', 'suggestedChainLength', 'suggestedType'],
     },
-    linkedGoalIds: arr({ type: 'string', enum: GOAL_IDS }, 0, 5),
+    // 同上：enum 已撤，合法性由适配层过滤（见 GOAL_IDS 注释）
+    linkedGoalIds: arr(str(40), 0, 5),
     clarification: {
       type: 'object',
       properties: {
@@ -431,8 +456,14 @@ export type SchemaName = keyof typeof SCHEMAS;
  */
 export const DEFAULT_AGENT_RUNTIME = {
   dispatcher: { temperature: 0.2, topP: 0.9, maxTokens: 1200 },
-  class: { temperature: 0.7, topP: 0.95, maxTokens: 3000 },
-  chain_reviewer: { temperature: 0.2, topP: 0.9, maxTokens: 3000 },
+  // class 3000 → 6000：2026-10-07 的存档审计里，一条**三步**链的实际输出已经
+  // 写到 2259 token —— 顶到 3000 的 75%。中文的 token 密度本就偏高，再加到
+  // 五步（轮 C 的口径），3000 是必然要破的线，而破线的那一刻就是截断
+  // （invalid_json，账已付、内容全废）。maxTokens 是天花板不是预算，抬它不花钱。
+  class: { temperature: 0.7, topP: 0.95, maxTokens: 6000 },
+  // chain_reviewer 3000 → 6000：审核官要把整条链**复述回来**（revisedQuests 是
+  // 完整草稿），输出天然是生成那一棒的一到两倍 —— 3000 对它从一开始就是小鞋。
+  chain_reviewer: { temperature: 0.2, topP: 0.9, maxTokens: 6000 },
   network_advisor: { temperature: 0.6, topP: 0.95, maxTokens: 1200 },
   arbiter: { temperature: 0.1, topP: 0.9, maxTokens: 1000 },
   blueprints: { temperature: 0.5, topP: 0.95, maxTokens: 4000 },

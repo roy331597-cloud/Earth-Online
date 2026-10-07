@@ -247,6 +247,20 @@ const buildLog = (args: {
   tokensOut: args.tokensOut,
 });
 
+/**
+ * 失败消息尾上的一截"截断诊断"（只在确有证据时加）。
+ *
+ * 2026-10-07 的存档审计给出的教训：同样是 invalid_json，"模型自己多写了一段"
+ * 与"输出被上限截断"是两种病，处方完全不同（前者修解析器，后者加预算）。
+ * 以前消息里只有一句看不懂的 JSON 报错，运维只能靠"输出长度恰好贴着 max_tokens"
+ * 这种旁证去猜。现在 finish_reason 从 gateway 一路带到这里 —— 'length' 就是
+ * 直接证据，把它说进消息里，人不用猜。
+ */
+const truncationNote = (chat: { finishReason?: string }, maxTokens: number): string =>
+  chat.finishReason === 'length'
+    ? `；服务端标记这次输出是被 ${maxTokens} token 的输出上限截断的（finish_reason=length）`
+    : '';
+
 // ---------------------------------------------------------------------------
 // 主入口
 // ---------------------------------------------------------------------------
@@ -405,7 +419,17 @@ export const invokeAgent = async <T>(call: AgentCall<T>, ctx: BusContext): Promi
   // —— 解析 ——
   const extracted = extractJson(chat.content);
   if (!extracted.ok) {
-    return failureOutcome(call, ctx, id, iso, inputDigest, chat, 'invalid_json', extracted.message, gates.circuit);
+    return failureOutcome(
+      call,
+      ctx,
+      id,
+      iso,
+      inputDigest,
+      chat,
+      'invalid_json',
+      `${extracted.message}${truncationNote(chat, runtime.maxTokens)}`,
+      gates.circuit,
+    );
   }
 
   const validated = validateAgainst(SCHEMAS[schemaName], extracted.value);
@@ -418,7 +442,7 @@ export const invokeAgent = async <T>(call: AgentCall<T>, ctx: BusContext): Promi
       inputDigest,
       chat,
       'schema_violation',
-      `${validated.path}：${validated.message}`,
+      `${validated.path}：${validated.message}${truncationNote(chat, runtime.maxTokens)}`,
       gates.circuit,
     );
   }
@@ -433,7 +457,9 @@ export const invokeAgent = async <T>(call: AgentCall<T>, ctx: BusContext): Promi
       agentId: call.agentId,
       source: 'api',
       latencyMs: chat.latencyMs,
-      corrections: validated.corrections,
+      // 解析器"救回来"的痕迹（如：模型在完整 JSON 之后又补写了一段，已忽略）
+      // 走和适配层修正同一条通道 —— 它是证据，不是日志。校验器自己的修正排后。
+      corrections: [...(extracted.recovered ? [extracted.recovered] : []), ...validated.corrections],
     },
     effect: {
       invocation: buildLog({

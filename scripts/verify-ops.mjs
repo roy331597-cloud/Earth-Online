@@ -2300,7 +2300,8 @@ try {
   // ===== 线上遇到的另一种失败：200，但内容是空的 =====
   //
   // 2026-10-07 线上事故的原样复现：deepseek-flash 的思考模式默认开着，
-  // 思考与正文共享 max_tokens —— 三次尝试的思考都吃满了那张 3000 的输出上限，
+  // 思考与正文共享 max_tokens —— 三次尝试的思考都吃满了那张输出上限
+  // （class 档，事故当时是 3000，现在按审计证据抬到了 6000），
   // 正文一个字没开始（finish_reason='length'，content 为空）。
   // 旧版的处方有两处不对，这次各钉一条：
   //   ① 话说反了 —— 一律报"可能触发了内容策略"，把玩家引向改措辞，
@@ -2314,7 +2315,7 @@ try {
         finish_reason: 'length',
       },
     ],
-    usage: { prompt_tokens: 800, completion_tokens: 3000 },
+    usage: { prompt_tokens: 800, completion_tokens: 6000 },
   };
   const emptyFetch = makeFetch(liveDispatch('investor'), { __rawBody: EMPTY_RAW });
   const emptyH = harness(toLive(createMockState()), { apiKey: T_KEY, fetchImpl: emptyFetch });
@@ -2323,16 +2324,16 @@ try {
     [emptyRes.ok, emptyRes.source], [true, 'mock']);
   check('空内容：一次操作只弹一条提示（不把同一件事念三遍）', emptyH.notices.length, 1);
   check('空内容：提示说真话 —— 指到思考占满输出上限，而不是猜"内容策略"',
-    emptyH.notices[0].body.includes('思考过程占满了输出上限 3000 token'), true);
+    emptyH.notices[0].body.includes('思考过程占满了输出上限 6000 token'), true);
   check('空内容："内容策略"这四个字从提示里消失了（旧版就是它把方向引偏的）',
     emptyH.notices[0].body.includes('内容策略'), false);
   check('空内容：重试照打 —— 一次操作共 1 次调度 + 3 次生成',
     emptyFetch.sends.length, 4);
   // 调度那两次的调用是成功的（makeFetch 的默认用量 120/240），
-  // 生成这一棒三次尝试各报 800/3000 —— 账本上应当一笔不多、一笔不少。
+  // 生成这一棒三次尝试各报 800/6000 —— 账本上应当一笔不多、一笔不少。
   check('空内容：三次尝试烧掉的 token 全数入账（不像旧版那样记 0）',
     [used(emptyH.state, 'tokensIn'), used(emptyH.state, 'tokensOut')],
-    [120 + 3 * 800, 240 + 3 * 3000]);
+    [120 + 3 * 800, 240 + 3 * 6000]);
   check('空内容：账上落了钱（账本不该因为"结果不能用"就少一笔）',
     used(emptyH.state, 'costUsdCents') > 0, true);
   check('出厂请求体明确关掉了思考（flash 默认开着它，而它会把正文挤没）',
@@ -2388,6 +2389,78 @@ try {
   const fourRes = await fourH.thunks.forgeChain({ idea: LIVE_IDEA, classId: null, deepDeliberation: false });
   check('模型给了 4 步 → 截到 3 步（一条链不该长到让人望而生畏）', fourRes.data.stepCount, 3);
   check('截断这件事也留下痕迹', fourRes.corrections.some((c) => c.includes('截到')), true);
+
+  // ===== 目标 id：模型自造一个 id，不该毁掉整次调用 =====
+  //
+  // 2026-10-07 存档审计的原样复现：模型把「全球通行海外身份」写成自造的
+  // OVERSEAS_IDENTITY —— 语义全对、名字不在册。旧 schema 的 enum 把它当
+  // 硬错误（「取值不在允许范围内」），**整次调度**因此被打回本地轨道；
+  // 而那次调用里其余的内容（路由、拟建的新职业线、信心度）全是好的。
+  // 现在的处分：
+  //   ① schema 不再对 id 做全有全无的判决（只要求是一串不长的字符串）；
+  //   ② 认不认得由 adapters.filterGoalIds 说了算 —— 丢弃、留痕，别的照用。
+  const inventedFetch = makeFetch(
+    liveDispatch('investor', {
+      linkedGoalIds: ['A9_ASSETS', 'OVERSEAS_IDENTITY'],
+      proposedClass: {
+        classId: 'language_architect',
+        displayName: 'Language Architect',
+        creed: '语言是通行证，不是考试科目。',
+        domains: ['可理解输入', '输出训练', '词汇网络', '发音与听力', '考试策略', '语言环境设计', '长期复利'],
+        personaBrief: '把语言当作可工程化的系统：输入、输出、反馈、复现。',
+        linkedGoalIds: ['GEO_INDEPENDENT_WORK', 'OVERSEAS_IDENTITY'],
+        attributeWeights: { foc: 0.3, wil: 0.3, int: 0.2, cha: 0.2 },
+        titleTiers: [
+          { fromLevel: 1, title: '备考者', requirementHint: '能完成一次完整模考' },
+          { fromLevel: 2, title: '稳定输入者', requirementHint: '连续 30 天输入不断档' },
+          { fromLevel: 3, title: '输出练习者', requirementHint: '能连续口语输出 2 分钟' },
+          { fromLevel: 4, title: '7.5 达成者', requirementHint: '四项均达到目标分' },
+        ],
+        expCurve: { base: 100, exponent: 1.2, maxLevel: 60 },
+        justification: '语言能力是海外身份与地理无关工作的前置基建。',
+      },
+    }),
+    liveClassOut([liveDraft(1), liveDraft(2)]),
+  );
+  const inventedH = harness(toLive(createMockState()), { apiKey: T_KEY, fetchImpl: inventedFetch });
+  const inventedRes = await inventedH.thunks.forgeChain({ idea: LIVE_IDEA, classId: null, deepDeliberation: false });
+  check('自造的目标 id：调度不再被整单驳回，这一次仍是真身铸的',
+    [inventedRes.ok, inventedRes.source], [true, 'api']);
+  check('自造的目标 id：被丢弃并留痕（顶层一处、拟建职业线一处）',
+    inventedRes.corrections.filter((c) => c.includes('OVERSEAS_IDENTITY')).length, 2);
+  check('自造的目标 id：玩家这一次不被打扰（那是 id 表的事，不是他需要处理的故障）',
+    inventedH.notices.length, 0);
+  check('自造的目标 id：那一趟调度真的发生了（1 次调度 + 1 次生成）',
+    inventedFetch.sends.length, 2);
+
+  // 同一处分的另一半：自造的 id 出现在**任务草稿**上（questDraftSchema 的 enum 也撤了）
+  const draftGoalFetch = makeFetch(
+    liveDispatch('investor'),
+    liveClassOut([liveDraft(1, { linkedGoalIds: ['A9_ASSETS', 'OVERSEAS_IDENTITY'] }), liveDraft(2)]),
+  );
+  const draftGoalH = harness(toLive(createMockState()), { apiKey: T_KEY, fetchImpl: draftGoalFetch });
+  const draftGoalRes = await draftGoalH.thunks.forgeChain({ idea: LIVE_IDEA, classId: null, deepDeliberation: false });
+  const draftGoalQuest =
+    draftGoalH.state.quests.byId[draftGoalH.state.quests.chains[draftGoalRes.data.chainId].questIds[0]];
+  check('草稿上的自造 id：落库时已滤掉，任务仍是真身铸的',
+    [draftGoalRes.source, draftGoalQuest.linkedGoalIds], ['api', ['A9_ASSETS']]);
+  check('草稿上的自造 id：同样留痕',
+    draftGoalRes.corrections.some((c) => c.includes('OVERSEAS_IDENTITY')), true);
+
+  // attributePoints:null —— 输出纪律教模型"缺失的可选项用 null"，schema 却当硬错拒
+  // （审计第 4 条调用「期望对象，收到 null」的真实根因：提示词与 schema 互相打架）
+  const apNullFetch = makeFetch(
+    liveDispatch('investor'),
+    liveClassOut([liveDraft(1, { reward: { exp: 220, attributePoints: null } }), liveDraft(2)]),
+  );
+  const apNullH = harness(toLive(createMockState()), { apiKey: T_KEY, fetchImpl: apNullFetch });
+  const apNullRes = await apNullH.thunks.forgeChain({ idea: LIVE_IDEA, classId: null, deepDeliberation: false });
+  const apNullQuest =
+    apNullH.state.quests.byId[apNullH.state.quests.chains[apNullRes.data.chainId].questIds[0]];
+  check('attributePoints:null：不再把一份内容完好的草稿整单拒掉',
+    [apNullRes.ok, apNullRes.source], [true, 'api']);
+  check('attributePoints:null：落库时擦成"没有这一格"，而不是原样带着 null',
+    ['attributePoints' in apNullQuest.reward, apNullQuest.reward.exp], [false, 220]);
 
   // ===== D · 闸门与提示：什么该打扰玩家，什么不该 =====
   //
@@ -2743,6 +2816,74 @@ try {
     [revFailLog.agentId, revFailLog.parsedOk], ['agent_chain_reviewer', false]);
   check('玩家被告知了这次是本地轨道顶上（断网/超时那一类意外总是要说的）',
     reviewFailH.notices.some((n) => n.title === '这次没接上'), true);
+
+  // 审核官"写完了 JSON 又补了一段" —— 2026-10-07 存档审计的原样复现：
+  // 先给出一份**完整的** JSON（内容全对，还把那一步从 5 小时压到了 2 小时），
+  // 随后又补写了一截（末尾多一个花括号）。旧解析器两招都失败 ——
+  // "第一个 `{` 到最后一个 `}`"会把补写的那一截也裹进来 ——
+  // 于是这次内容完全可用的审核被打回替身，玩家看到的是替身那句
+  // 「深度推演已过审」（事故现场他最困惑的一句话）。
+  // 修复是解析器的第三招：取**第一个完整的 JSON 值**（括号平衡扫描），其余忽略。
+  const recoveredReview = {
+    approved: false,
+    reviewerNote: '第一步原本要你连考 5 小时。改成先做阅读+听力两科，2 小时出结果。',
+    revisedQuests: [liveDraft(1, { title: '审核官压小后的第一步' }), liveDraft(2)],
+    revisionInstructions: ['首步压到 2 小时'],
+    difficultyCurve: { isAscending: true, comment: '修订后递进合理' },
+    spoilerCheck: { passed: true, leakingTempIds: [], comment: '无剧透' },
+    continuityCheck: { passed: true, brokenJoints: [] },
+    finalOrder: ['api_1', 'api_2'],
+  };
+  const recoveredFetch = makeFetch(
+    liveDispatch('investor'),
+    liveClassOut([liveDraft(1), liveDraft(2)]),
+    {
+      __rawBody: {
+        choices: [
+          {
+            message: { content: `${JSON.stringify(recoveredReview)},"revisionInstructions":["又补写的一段"]}` },
+          },
+        ],
+        usage: { prompt_tokens: 4294, completion_tokens: 993 },
+      },
+    },
+  );
+  const recoveredH = harness(toLive(createMockState()), { apiKey: T_KEY, fetchImpl: recoveredFetch });
+  const recoveredRes = await recoveredH.thunks.forgeChain({ idea: LIVE_IDEA, classId: null, deepDeliberation: true });
+  const recoveredChain = recoveredH.state.quests.chains[recoveredRes.data.chainId];
+  check('审核官"写完又补一段"：整份输出被救回，这一次仍是真身铸的',
+    [recoveredRes.ok, recoveredRes.source], [true, 'api']);
+  check('救回的那份审核真的被采用了（修订与排序都来自它）',
+    recoveredChain.questIds.map((id) => recoveredH.state.quests.byId[id].title),
+    ['审核官压小后的第一步', '真身给的第 2 步']);
+  check('批注是真身审核官写的，不是替身那句"已过审"',
+    recoveredH.state.quests.byId[recoveredChain.questIds[0]].origin.reviewerNote.includes('连考 5 小时'), true);
+  check('"救回"这件事留痕（证据，不是日志）',
+    recoveredRes.corrections.some((c) => c.includes('又补写')), true);
+  check('救回之后没有惊动玩家（内容能用，就没有事故要报）',
+    recoveredH.notices.length, 0);
+
+  // 真被截断的那一种：救不了就是救不了，但消息要把诊断说全
+  // （finish_reason='length' 是直接证据 —— 处方是加预算，不是修解析）
+  const truncatedFetch = makeFetch(
+    liveDispatch('investor'),
+    liveClassOut([liveDraft(1), liveDraft(2)]),
+    {
+      __rawBody: {
+        choices: [
+          { message: { content: '{"approved":true,"reviewerNote":"先把第一步压小一点' }, finish_reason: 'length' },
+        ],
+        usage: { prompt_tokens: 4294, completion_tokens: 6000 },
+      },
+    },
+  );
+  const truncatedH = harness(toLive(createMockState()), { apiKey: T_KEY, fetchImpl: truncatedFetch });
+  const truncatedRes = await truncatedH.thunks.forgeChain({ idea: LIVE_IDEA, classId: null, deepDeliberation: true });
+  check('审核官输出真被截断：链照常落库（一次审核降级不毁整次铸造）', truncatedRes.ok, true);
+  check('截断的提示把"输出上限"说到位（而不是只报一句看不懂的 JSON 错误）',
+    truncatedH.notices.some((n) => n.body.includes('输出上限') && n.body.includes('截断')), true);
+  check('截断那一趟的原始输出留在日志里（审计不靠猜）',
+    truncatedH.state.agents.invocations.at(-1).parsedOk, false);
   // -------------------------------------------------------------------------
   console.log('\n【㉖ 通讯录：手动添加一个人】');
   // -------------------------------------------------------------------------

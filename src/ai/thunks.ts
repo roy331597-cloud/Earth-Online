@@ -41,6 +41,7 @@ import {
   isUsableForge,
   normalizeRerouteOutcome,
   resolveRoutedClass,
+  sanitizeDispatcherDecision,
 } from '@/ai/adapters';
 import { invokeAgent } from '@/ai/bus';
 import type { AgentCall, BusContext, BusEffect } from '@/ai/bus';
@@ -487,6 +488,12 @@ export const createThunks = (deps: ThunkDeps) => {
       }, said);
       if (run === null) return { ok: false, message: `调度员这次没接上。${retry}` };
       decision = run.data;
+      // 调度员写了目录外的目标 id（模型自造的那种）时，在这里擦掉并留痕。
+      // 以前 schema 的 enum 会把**整次调度**硬拒 —— 2026-10-07 事故，
+      // 见 adapters.filterGoalIds 的注释。丢弃不认得的，其余照常使用。
+      const cleanedDecision = sanitizeDispatcherDecision(decision);
+      corrections.push(...cleanedDecision.corrections);
+      decision = cleanedDecision.value;
       // ⚠️ 调度员的来源**不进**最终的 source：它出的是路由决定（这条想法走哪条线），
       //    那些字一个也不会落进任务链。链上每个字都是从生成那一棒来的 ——
       //    那一棒的来源在下面合并（见 classRun 旁的注释）。若在这里并进来，

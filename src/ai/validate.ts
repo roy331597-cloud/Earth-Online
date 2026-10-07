@@ -176,33 +176,91 @@ const walk = (
 };
 
 /**
+ * 从 start 处（一个 `{`）开始，找到**第一个括号配平的位置**，把这一段切回来。
+ * 字符串与转义都跳过 —— 花括号出现在 `"narrative": "…… { ……"` 里是合法的。
+ *
+ * 扫不到配平点（输出真的断在半句上）返回 null：那种情况救不了，
+ * 也不该装作能救 —— 调用方会带着诚实的原因失败。
+ */
+const scanFirstValue = (text: string, start: number): string | null => {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === '{' || ch === '[') {
+      depth++;
+      continue;
+    }
+    if (ch === '}' || ch === ']') {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+};
+
+/**
  * 从模型回复里抠出 JSON。
  *
  * 现实里模型会干这几件事，都得接住：
  *   · 包一层 ```json ... ``` 围栏；
  *   · 前后各加一句"好的，以下是……"；
- *   · 极少数情况下在 JSON 之后又补一段解释。
+ *   · 在 JSON 之后又补一段。补的**不一定**是解释 —— 有时补的是另一半自己：
+ *     2026-10-07 线上，审核官先写完一份**完整的** JSON（1976 字，内容全对，
+ *     还把那一步从 5 小时压到了 2 小时），随后又补写了一截
+ *     （`,"revisionInstructions":…}`，末尾多一个花括号）。旧策略两招：
+ *     整体 parse 失败；"第一个 `{` 到最后一个 `}`"把补写的那一截也裹了进来，
+ *     同样失败 —— 一次内容完全可用的审核就这样被打回本地替身。
  *
- * 策略是先尝试整体 parse，失败再从**第一个 `{` 到最后一个 `}`** 截一段重试。
- * 只做这两步 —— 再往下就是写一个容错解析器，那属于把错误吞掉。
+ * 所以策略是三步：
+ *   ① 整体 parse —— 干净的那一种；
+ *   ② 第一个 `{` 到最后一个 `}` —— 接住"前后包了话"的常见形态；
+ *   ③ **第一个完整的 JSON 值**（括号平衡扫描）—— 接住"JSON 之后还有东西"
+ *      的那一种：从第一个 `{` 扫到第一次配平为止，后面的全部不要。
+ * 只做这三步 —— 再往下就是容错解析器（补括号、猜逗号），那属于把错误吞掉：
+ * 一份 95% 正确的 JSON 被"修"成 70% 正确的东西，比诚实地失败更糟。
+ *
+ * 第 ③ 招接住的东西在 `recovered` 里说人话 —— 调用方（bus）会把它并进
+ * corrections：这不是日志，是证据，"模型这次多写了"应该是个能被看见的事实。
  */
-export const extractJson = (raw: string): { ok: true; value: unknown } | { ok: false; message: string } => {
+export const extractJson = (
+  raw: string,
+): { ok: true; value: unknown; recovered?: string } | { ok: false; message: string } => {
   const cleaned = raw
     .replace(/^﻿/, '')
     .replace(/```(?:json)?\s*/gi, '')
     .replace(/```/g, '')
     .trim();
 
-  const attempts = [cleaned];
+  const attempts: Array<{ text: string; recovered?: string }> = [{ text: cleaned }];
   const first = cleaned.indexOf('{');
   const last = cleaned.lastIndexOf('}');
-  if (first !== -1 && last > first) attempts.push(cleaned.slice(first, last + 1));
+  if (first !== -1 && last > first) attempts.push({ text: cleaned.slice(first, last + 1) });
+  const scanned = first === -1 ? null : scanFirstValue(cleaned, first);
+  if (scanned !== null && !attempts.some((a) => a.text === scanned)) {
+    attempts.push({
+      text: scanned,
+      recovered: '模型在第一个完整 JSON 之后又补写了一段内容，已只取前者（后面的部分被忽略）',
+    });
+  }
 
   let lastError = '未知错误';
   for (const candidate of attempts) {
-    if (candidate.length === 0) continue;
+    if (candidate.text.length === 0) continue;
     try {
-      return { ok: true, value: JSON.parse(candidate) };
+      const value = JSON.parse(candidate.text);
+      return candidate.recovered ? { ok: true, value, recovered: candidate.recovered } : { ok: true, value };
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
     }
