@@ -196,9 +196,17 @@ function AiBusSection() {
     try {
       const result = await pingDeepSeek({ baseUrl: ai.baseUrl, apiKey: key });
       const message = redact(result.message);
+      // 名单里有没有我们**实际要用的那个**模型，比"有几个可用"更要紧：
+      // 名字写错时，一次真调用会在战斗中才失败，而握手这里就能先看见。
       setHint(
         result.ok
-          ? `DeepSeek 响应正常 · ${result.latencyMs}ms${result.models.length > 0 ? `　可用模型 ${result.models.length} 个` : ''}`
+          ? `DeepSeek 响应正常 · ${result.latencyMs}ms${
+              result.models.length > 0
+                ? result.models.includes(ai.model)
+                  ? `　含 ${ai.model}`
+                  : `　⚠ 可用列表里没有 ${ai.model}`
+                : ''
+            }`
           : `测试失败：${message}`,
       );
       mutate((s) => ({
@@ -219,7 +227,7 @@ function AiBusSection() {
       endAgentCall(activityId);
       setPinging(false);
     }
-  }, [draft, ai.baseUrl, beginAgentCall, endAgentCall, mutate]);
+  }, [draft, ai.baseUrl, ai.model, beginAgentCall, endAgentCall, mutate]);
 
   // ⚠️ 与提示条上那个「先切到本地轨道」按钮共用一份定义（store/agentRuntime.ts）。
   //    各写一份的话，两个"离线模式"迟早会在 `provider` 这个字段上分岔 ——

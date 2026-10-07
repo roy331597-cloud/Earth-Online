@@ -360,6 +360,17 @@ export const invokeAgent = async <T>(call: AgentCall<T>, ctx: BusContext): Promi
     // 失败也**可能是**可重试的，但"重试"由 gateway 内部做完了。
     // 走到这里说明重试也没救回来 —— 那就降级，同时给熔断记一笔（如果该记）。
     const fallback = mockOutcome(chat.code, chat.message, 'api', chat.latencyMs);
+    // 账分两种记：
+    //   · 传输层没走通的（429/5xx/超时/断网）没有可结算的 token —— 429 不计费，
+    //     超时计不计费我方无从知晓。与其编一个数字入账，不如记 0，然后由
+    //     lastHealthCheck 与熔断把"这家服务现在不对劲"讲清楚。
+    //   · 拿到了 200 的那一种（如"空内容"）不是：对面收下了请求、真的烧了 token，
+    //     gateway 把各次尝试的用量累加带了出来（ChatFailure.tokensIn/Out）——
+    //     那笔钱照记，与 failureOutcome 对 schema_violation 的语义一致：
+    //     账本不该因为"结果不能用"就少一笔。billed 取"有没有这个数"，
+    //     也就是"服务端是否真的应答过"（agentEffect 拿它决定 configured）。
+    const tokensIn = chat.tokensIn ?? 0;
+    const tokensOut = chat.tokensOut ?? 0;
     return {
       result: call.mock
         ? fallback.result
@@ -380,14 +391,11 @@ export const invokeAgent = async <T>(call: AgentCall<T>, ctx: BusContext): Promi
           parsedOk: false,
           errorMessage: chat.message,
           latencyMs: chat.latencyMs,
-          // 传输层就失败了的调用没有可结算的 token：429/5xx 不计费，
-          // 超时计不计费我方无从知晓 —— 与其编一个数字入账，不如记 0，
-          // 然后由 lastHealthCheck 与熔断把"这家服务现在不对劲"讲清楚。
-          tokensIn: 0,
-          tokensOut: 0,
+          tokensIn,
+          tokensOut,
         }),
-        usage: { tokensIn: 0, tokensOut: 0, costUsdCents: 0 },
-        billed: false,
+        usage: { tokensIn, tokensOut, costUsdCents: tokensToCents(tokensIn, tokensOut) },
+        billed: chat.tokensIn !== undefined || chat.tokensOut !== undefined,
         circuit,
         reason: { code: chat.code, message: chat.message, source: 'api' },
       },

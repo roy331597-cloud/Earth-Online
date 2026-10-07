@@ -9,8 +9,10 @@
 // 而不用假装自己有 API Key。verify-ops 里跑的就是这条路。
 //
 // 协议：DeepSeek 提供 OpenAI 兼容的 /chat/completions 与 /models，
-// 所以这里没有一行是 DeepSeek 专有的 —— 换任何一家兼容厂商，
-// 改的只是 `AiRuntimeState.baseUrl`，代码不动。
+// 所以这里几乎没有 DeepSeek 专有的东西 —— 换任何一家兼容厂商，
+// 改的只是 `AiRuntimeState.baseUrl`，代码几乎不动。
+// 唯一的例外是请求体里的 `thinking`（见 chatCompletion）：它按 baseUrl 打了闸，
+// 只在 DeepSeek 上出现，理由写在那行旁边。
 //
 // ⚠️ 这一层**绝不**读 LocalStorage、绝不读 Date.now() 之外的全局状态。
 //    密钥由调用方从 secretStore 取好传进来（见 ai/bus.ts）。
@@ -60,6 +62,15 @@ export interface ChatFailure {
   message: string;
   retryable: boolean;
   latencyMs: number;
+  /**
+   * 这一次调用**已经花掉的**用量（各次尝试累加带上来的）。
+   *
+   * 只在至少拿到过一次 200 应答时出现 —— 传输层就失败的调用（429/5xx/超时）
+   * 没有这个数，也不该编一个出来。bus 靠"有没有这两格"区分两种失败：
+   * 对面收下了请求、真的烧了 token 的那一种，账照记。
+   */
+  tokensIn?: number;
+  tokensOut?: number;
 }
 
 export type ChatOutcome = ChatSuccess | ChatFailure;
@@ -111,7 +122,13 @@ const joinUrl = (base: string, path: string): string => `${base.replace(/\/+$/, 
 // ---------------------------------------------------------------------------
 
 interface OpenAiChoice {
-  message?: { content?: unknown };
+  message?: {
+    content?: unknown;
+    /** 思考模式下的思维链正文（DeepSeek 把"想"与"说"分开放在这里） */
+    reasoning_content?: unknown;
+  };
+  /** 'stop' | 'length' | 'content_filter' | … 空内容时，它是现场唯一的证据 */
+  finish_reason?: unknown;
 }
 interface OpenAiUsage {
   prompt_tokens?: unknown;
@@ -122,6 +139,29 @@ interface OpenAiBody {
   usage?: OpenAiUsage;
   error?: { message?: unknown };
 }
+
+/**
+ * 空内容不是一种病，是几种病共用的症状。
+ *
+ * 旧版一律说「可能触发了内容策略」—— 那是猜的，而且猜偏了会把玩家
+ * 引到错误的方向（去改措辞）而不是正确的那一格。把手上真实的证据
+ * （finish_reason / reasoning_content / 有没有 choices）翻译成人话，
+ * 才是这条消息该做的事。2026-10-07 线上事故的真身就是第一种：
+ * flash 的思考过程吃满了输出上限，正文没有开始。
+ */
+const describeEmptyContent = (parsed: OpenAiBody, maxTokens: number): string => {
+  const choice = parsed.choices?.[0];
+  if (!choice) return '模型返回了空内容（服务端没有返回任何候选）';
+  const finish = typeof choice.finish_reason === 'string' ? choice.finish_reason : null;
+  if (finish === 'length') {
+    const reasoning = typeof choice.message?.reasoning_content === 'string' ? choice.message.reasoning_content : '';
+    return reasoning.trim().length > 0
+      ? `模型返回了空内容（思考过程占满了输出上限 ${maxTokens} token，正文没有开始）`
+      : `模型返回了空内容（输出上限 ${maxTokens} token 被耗尽，正文没有开始）`;
+  }
+  if (finish === 'content_filter') return '模型返回了空内容（触发了服务端的内容过滤）';
+  return '模型返回了空内容（服务端没有给出原因）';
+};
 
 /**
  * 发一次 chat/completions。
@@ -168,6 +208,14 @@ export const chatCompletion = async (
     top_p: call.runtime.topP,
     max_tokens: call.runtime.maxTokens,
     ...(call.runtime.jsonMode ? { response_format: { type: 'json_object' } } : {}),
+    // ⚠️ 本文件唯一的厂商专有字段（按 baseUrl 打闸，换别家时它不会出现）。
+    //    deepseek-flash 的思考模式**默认开着**，且思考与正文共享 max_tokens：
+    //    本项目的提示词是按非思考模型调校的，让它先想满三千 token 再开口，
+    //    等于把正文挤没 —— 2026-10-07 线上就是这样连续三次空内容
+    //    （finish_reason='length'，见 describeEmptyContent）。这里明确关掉。
+    //    若将来要为「深度推演」打开思考，那应该是一个显式的运行时开关，
+    //    而不是让这个默认值回来。
+    ...(cfg.baseUrl.includes('deepseek') ? { thinking: { type: 'disabled' } } : {}),
     stream: false,
   });
 
@@ -179,6 +227,12 @@ export const chatCompletion = async (
     retryable: false,
     latencyMs: 0,
   };
+  // 重试不是免费的：每一次拿到 200 的尝试，对面都已经真的烧了 token。
+  // 把各次尝试报出的用量累加进这两格，随最终失败一并带出去（见 ChatFailure.tokensIn）——
+  // 只记最后一次的话，一次"空内容 ×3"的事故会在账本上只留下一笔。
+  let spentIn = 0;
+  let spentOut = 0;
+  let reachedServer = false;
 
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (attempt > 0) await sleep(backoffMs(attempt - 1));
@@ -233,10 +287,13 @@ export const chatCompletion = async (
 
       const content = parsed.choices?.[0]?.message?.content;
       if (typeof content !== 'string' || content.trim().length === 0) {
+        reachedServer = true;
+        if (typeof parsed.usage?.prompt_tokens === 'number') spentIn += parsed.usage.prompt_tokens;
+        if (typeof parsed.usage?.completion_tokens === 'number') spentOut += parsed.usage.completion_tokens;
         last = {
           ok: false,
           code: 'content_refused',
-          message: '模型返回了空内容（可能触发了内容策略）',
+          message: describeEmptyContent(parsed, call.runtime.maxTokens),
           retryable: true,
           latencyMs,
         };
@@ -267,7 +324,7 @@ export const chatCompletion = async (
     }
   }
 
-  return last;
+  return reachedServer ? { ...last, tokensIn: spentIn, tokensOut: spentOut } : last;
 };
 
 const extractServerMessage = (text: string): string | null => {

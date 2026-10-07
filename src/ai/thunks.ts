@@ -487,7 +487,12 @@ export const createThunks = (deps: ThunkDeps) => {
       }, said);
       if (run === null) return { ok: false, message: `调度员这次没接上。${retry}` };
       decision = run.data;
-      source = mergeSource(source, run.source);
+      // ⚠️ 调度员的来源**不进**最终的 source：它出的是路由决定（这条想法走哪条线），
+      //    那些字一个也不会落进任务链。链上每个字都是从生成那一棒来的 ——
+      //    那一棒的来源在下面合并（见 classRun 旁的注释）。若在这里并进来，
+      //    "调度走通了真身、生成却由替身顶上"（比如线上那次空内容）会被报成 api，
+      //    而落库的是本地模板 —— 正是 ⑤ 的 !usable 分支里说过的那个"不会报错、
+      //    只会让人误判的谎"，只是换了个入口。
       corrections.push(...run.corrections);
     }
 
@@ -521,6 +526,9 @@ export const createThunks = (deps: ThunkDeps) => {
     }, said);
     if (classRun === null) return { ok: false, message: `生成这一步没接上。${retry}` };
     const classOut: ClassAgentOutput = classRun.data;
+    // 落库的字从这一棒来，来源就记这一棒的：bus 在生成失败（空内容 / schema 不过 /
+    // 断网）时会把替身的稿子交回来（source='mock'）—— 这时最终来源必须是 mock。
+    // 与 ⑤ 的 !usable 分支同一条规矩：真调用发生过这件事由提示与日志负责。
     source = mergeSource(source, classRun.source);
     corrections.push(...classRun.corrections);
 

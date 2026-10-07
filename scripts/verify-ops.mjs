@@ -2035,6 +2035,8 @@ try {
   /**
    * 一个会记账的假 fetch。
    *   对象 → 200 + OpenAI 形状的响应（content 是它的 JSON 序列化）
+   *   `{ __rawBody: … }` → 200，应答体原样就是 __rawBody —— 给"协议合法、
+   *     内容却是空的"这类现场用（空内容 / 没有候选 / 内容过滤都只能这样造）
    *   数字 → 那个 HTTP 状态码
    *   Error → 直接抛（模拟断网）
    * 最后一步会被重复取用 —— 重试打的是同一个端点，不该走几步就写几个 step。
@@ -2047,6 +2049,9 @@ try {
       if (step instanceof Error) throw step;
       if (typeof step === 'number') {
         return { ok: false, status: step, text: async () => JSON.stringify({ error: { message: '服务端拒绝了' } }) };
+      }
+      if (step && typeof step === 'object' && '__rawBody' in step) {
+        return { ok: true, status: 200, text: async () => JSON.stringify(step.__rawBody) };
       }
       return {
         ok: true,
@@ -2267,6 +2272,8 @@ try {
   const brokenH = harness(toLive(createMockState()), { apiKey: T_KEY, fetchImpl: brokenFetch });
   const brokenRes = await brokenH.thunks.forgeChain({ idea: LIVE_IDEA, classId: null, deepDeliberation: false });
   check('缺字段 → schema_violation → 同样优雅降级（不是白屏、不是崩）', brokenRes.ok, true);
+  check('缺字段顶替身后，来源如实标成 mock（链上的字是替身的，不许报 api）',
+    brokenRes.source, 'mock');
   check('这一次的钱**照记**（请求成功、内容不能用 —— 账本不该少一笔）',
     brokenH.state.ai.usage.costUsdCents > 0, true);
   check('校验失败的那条调用日志标着 parsedOk=false',
@@ -2289,6 +2296,69 @@ try {
     thinChain.rationale.includes('真身给的第 1 步') && thinChain.rationale.includes('下一步的原料'), true);
   check('这一回兜底也留下痕迹（它是证据，不是日志）',
     thinRes.corrections.some((c) => c.includes('理由')), true);
+
+  // ===== 线上遇到的另一种失败：200，但内容是空的 =====
+  //
+  // 2026-10-07 线上事故的原样复现：deepseek-flash 的思考模式默认开着，
+  // 思考与正文共享 max_tokens —— 三次尝试的思考都吃满了那张 3000 的输出上限，
+  // 正文一个字没开始（finish_reason='length'，content 为空）。
+  // 旧版的处方有两处不对，这次各钉一条：
+  //   ① 话说反了 —— 一律报"可能触发了内容策略"，把玩家引向改措辞，
+  //      而真正的原因在模型的思考开关上（见 describeEmptyContent 的注释）；
+  //   ② 账没记 —— 这是 200 应答，对面真的烧了三次 token，却按"传输层失败"
+  //      记成 0。gateway 现在把各次尝试的用量累加带出来，bus 照记。
+  const EMPTY_RAW = {
+    choices: [
+      {
+        message: { content: '', reasoning_content: '先把每条线的因果捋一遍……（此处三千字从略）' },
+        finish_reason: 'length',
+      },
+    ],
+    usage: { prompt_tokens: 800, completion_tokens: 3000 },
+  };
+  const emptyFetch = makeFetch(liveDispatch('investor'), { __rawBody: EMPTY_RAW });
+  const emptyH = harness(toLive(createMockState()), { apiKey: T_KEY, fetchImpl: emptyFetch });
+  const emptyRes = await emptyH.thunks.forgeChain({ idea: LIVE_IDEA, classId: null, deepDeliberation: false });
+  check('空内容：玩家这一次点击仍然有东西出来（本地轨道顶上，不是白屏）',
+    [emptyRes.ok, emptyRes.source], [true, 'mock']);
+  check('空内容：一次操作只弹一条提示（不把同一件事念三遍）', emptyH.notices.length, 1);
+  check('空内容：提示说真话 —— 指到思考占满输出上限，而不是猜"内容策略"',
+    emptyH.notices[0].body.includes('思考过程占满了输出上限 3000 token'), true);
+  check('空内容："内容策略"这四个字从提示里消失了（旧版就是它把方向引偏的）',
+    emptyH.notices[0].body.includes('内容策略'), false);
+  check('空内容：重试照打 —— 一次操作共 1 次调度 + 3 次生成',
+    emptyFetch.sends.length, 4);
+  // 调度那两次的调用是成功的（makeFetch 的默认用量 120/240），
+  // 生成这一棒三次尝试各报 800/3000 —— 账本上应当一笔不多、一笔不少。
+  check('空内容：三次尝试烧掉的 token 全数入账（不像旧版那样记 0）',
+    [used(emptyH.state, 'tokensIn'), used(emptyH.state, 'tokensOut')],
+    [120 + 3 * 800, 240 + 3 * 3000]);
+  check('空内容：账上落了钱（账本不该因为"结果不能用"就少一笔）',
+    used(emptyH.state, 'costUsdCents') > 0, true);
+  check('出厂请求体明确关掉了思考（flash 默认开着它，而它会把正文挤没）',
+    [JSON.parse(emptyFetch.sends[0].body).thinking, JSON.parse(emptyFetch.sends[1].body).thinking],
+    [{ type: 'disabled' }, { type: 'disabled' }]);
+
+  // 另一种空法：连候选都没有 —— 话要跟着证据换，不能穿同一条裤子上台
+  const noChoiceFetch = makeFetch(liveDispatch('investor'), {
+    __rawBody: { choices: [], usage: { prompt_tokens: 500, completion_tokens: 0 } },
+  });
+  const noChoiceH = harness(toLive(createMockState()), { apiKey: T_KEY, fetchImpl: noChoiceFetch });
+  await noChoiceH.thunks.forgeChain({ idea: LIVE_IDEA, classId: null, deepDeliberation: false });
+  check('空内容（连候选都没有）：消息如实说"没有返回任何候选"',
+    noChoiceH.notices[0].body.includes('服务端没有返回任何候选'), true);
+
+  // 内容过滤：这一种才是真的被策略拦下 —— 四种证据四种说法，它们互不冒充
+  const filteredFetch = makeFetch(liveDispatch('investor'), {
+    __rawBody: {
+      choices: [{ message: { content: '' }, finish_reason: 'content_filter' }],
+      usage: { prompt_tokens: 500, completion_tokens: 40 },
+    },
+  });
+  const filteredH = harness(toLive(createMockState()), { apiKey: T_KEY, fetchImpl: filteredFetch });
+  await filteredH.thunks.forgeChain({ idea: LIVE_IDEA, classId: null, deepDeliberation: false });
+  check('空内容（真的被过滤了）：这一种才说"触发了服务端的内容过滤"',
+    filteredH.notices[0].body.includes('触发了服务端的内容过滤'), true);
 
   // 语义层的拦：目录里没有这条职业线
   const ghostFetch = makeFetch(liveDispatch('quantum_chef'), liveClassOut([liveDraft(1), liveDraft(2)]));
