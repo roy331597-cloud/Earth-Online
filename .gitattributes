@@ -1,3 +1,3 @@
-# 仓库内存成 LF（服务器上 Docker 构建最省心）；Windows 工作树不受影响；
+# 仓库与工作树一律 LF（服务器构建、逐字节快照都省心；Windows 也无妨）；
 # 图片等二进制由 git 自动识别，不会被转换。
-* text=auto
+* text=auto eol=lf
