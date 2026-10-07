@@ -1306,7 +1306,7 @@ export function createMockState(): EarthOnlineState {
     ai: {
       provider: 'mock', // Phase 2 不发起任何真实请求
       baseUrl: 'https://api.deepseek.com',
-      model: 'deepseek-chat',
+      model: 'deepseek-flash',
       apiKeyStorageKey: STORAGE_KEYS.apiKey,
       configured: false,
       mockModeEnabled: true,

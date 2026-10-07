@@ -35,7 +35,7 @@ export function createAgentRoster(createdAt: ISODateTime): AgentRecord[] {
   });
 
   const runtime = (temperature: number, over: Partial<AgentRuntimeConfig> = {}): AgentRuntimeConfig => ({
-    model: 'deepseek-chat',
+    model: 'deepseek-flash',
     temperature,
     topP: 0.9,
     maxTokens: 3072,

@@ -382,14 +382,21 @@ export interface QuestDraft {
 export interface ClassAgentOutput {
   /** 生成模式自述，便于调试 */
   mode: 'single_quest' | 'chain';
+  /**
+   * 链的包装块。四个字段都可缺省 —— 校验器不把它们列为必填（见 schemas.ts）：
+   * `title` / `rationale` 缺了，`adaptClassOutput` 有诚实的兜底顶上（灵感开头 /
+   * 职业信条）并记一笔 corrections；`estimatedTotalEffort` / `deliverables`
+   * 在真实管线里没有消费者。一次"少写一句理由就整单退回模板"的线上事故，
+   * 就是从这里放行的。
+   */
   chain: {
-    title: string;
+    title?: string;
     /** 为什么这条链能把你推向终极目标（玩家可见） */
-    rationale: string;
+    rationale?: string;
     /** 该链整体预估周期 */
-    estimatedTotalEffort: EffortEstimate;
+    estimatedTotalEffort?: EffortEstimate;
     /** 该链预期产出的"作品/证据"，这是最有价值的部分 */
-    deliverables: string[];
+    deliverables?: string[];
   } | null;
   quests: QuestDraft[];
   /** 给玩家的一句寄语（克制、不吹捧） */

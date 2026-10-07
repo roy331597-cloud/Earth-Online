@@ -698,8 +698,13 @@ export type BuildHudSnapshot = (state: EarthOnlineState, now: Date) => import('.
  * （金色光晕的待看队列）。老档两个字段都补空 —— **不补造时间**：
  * 那些是"这一版之前就已经做到的事"，它们的日期没有人知道，
  * 编一个出来就是在档案上写一个假的日子。
+ *
+ * v7（2026-10-07 调度改用 deepseek-flash）：AI 运行时的默认模型从
+ * `deepseek-chat` 换成 `deepseek-flash`。线上调用取的是 `ai.model`
+ * （它压过一切出厂默认，见 bus.ts）—— 老档里**等于旧默认值**的那一份，
+ * 迁移时跟着换代；其余模型名一个字不动（那才可能是谁挑过的立场）。
  */
-export const CURRENT_SCHEMA_VERSION = 6;
+export const CURRENT_SCHEMA_VERSION = 7;
 
 /**
  * 迁移注册表。每一次结构性变更都必须新增一条迁移，禁止原地改老迁移。

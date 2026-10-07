@@ -226,7 +226,7 @@ export function buildSystemPrompt(opts: BuildSystemPromptOptions): string {
 export function runtimeFor(kind: AgentKind, overrides?: Partial<AgentRuntimeConfig>): AgentRuntimeConfig {
   const preset = DEFAULT_AGENT_RUNTIME[kind];
   return {
-    model: 'deepseek-chat',
+    model: 'deepseek-flash',
     temperature: preset.temperature,
     topP: preset.topP,
     maxTokens: preset.maxTokens,

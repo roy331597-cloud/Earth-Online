@@ -254,4 +254,37 @@ export const MIGRATIONS: MigrationRegistry = {
 
     return { ...prev, meta, unlockables };
   },
+
+  // v6 → v7：AI 的默认模型从 `deepseek-chat` 换成 `deepseek-flash`。
+  //
+  // 这条迁移只碰一个字段，且**只在它精确等于旧默认值**时才碰。为什么这不算
+  // "搬立场"：`ai.model` 从来没有过让玩家选它的入口 —— 存档里的
+  // 'deepseek-chat' 不是谁的选择，只是出厂那一版的默认值本身。默认值换代，
+  // 老档跟着换代，属于"补数据"。
+  //
+  // 反过来说，等于别的值（或缺失）时一个字不动：将来若真有了模型选择器，
+  // 那一刻起 `ai.model` 就是玩家的立场，默认值换代不许把它顶掉。
+  //
+  // agent 花名册里的 `runtime.model` 不在此列：它不上线 —— 每次调用真正发出的
+  // 模型名取自 `ai.model`（见 bus.ts 的 runtimeFor 调用），花名册那份是元数据，
+  // 老档里原样留着，不借迁移之名搬运。
+  7: (prev, now) => {
+    const ai = asRecord(prev.ai);
+    if (ai.model === 'deepseek-chat') ai.model = 'deepseek-flash';
+
+    const meta = asRecord(prev.meta);
+    meta.schemaVersion = 7;
+    const history = Array.isArray(meta.migrationHistory) ? meta.migrationHistory : [];
+    meta.migrationHistory = [
+      ...history,
+      {
+        from: 6,
+        to: 7,
+        at: now.toISOString(),
+        notes: 'AI 默认模型 deepseek-chat → deepseek-flash（只换精确等于旧默认值的那一份，其余模型名不动）',
+      },
+    ];
+
+    return { ...prev, meta, ai };
+  },
 };

@@ -204,7 +204,12 @@ const classAgentOutputSchema: JsonSchema = {
         },
         deliverables: arr(str(60), 1, 5),
       },
-      required: ['title', 'rationale', 'estimatedTotalEffort', 'deliverables'],
+      // ⚠️ 这一块刻意**不列 required**：它是包装，不是内容 —— 内容是 quests。
+      //    线上的一次回复少写了一句 chain.rationale，整单被打回本地轨道：
+      //    模型明明把每一步都给出了，玩家却拿到了模板。而适配器对这一句本来
+      //    就有诚实的兜底（职业信条），`title` 缺了能用灵感开头顶上，
+      //    `estimatedTotalEffort` / `deliverables` 在真实管线里没有消费者。
+      //    必填只该留给"缺了就真的不成链"的东西。
       nullable: true,
     },
     quests: arr(questDraftSchema, 1, 7),

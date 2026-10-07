@@ -258,14 +258,21 @@ export const adaptClassOutput = (
     // 让它以 1 步的形态返回，由调用方（thunk）按"成不了链"处理。
   }
 
+  // 链的包装块：模型少写一句不毁整稿（校验器对这一块不设必填，见 schemas.ts）。
+  // 两处兜底都记一笔 —— 和截断、退回一样，"模型偷过懒"是证据，不是日志。
   const chain = out.chain;
-  const chainTitle = chain?.title?.trim() ? clip(chain.title, 28) : clip(ctx.idea, 14) || '新的一条链';
+  const titleFromModel = chain?.title?.trim();
+  const chainTitle = titleFromModel ? clip(titleFromModel, 28) : clip(ctx.idea, 14) || '新的一条链';
+  if (!titleFromModel) corrections.push('模型没写链标题，已用灵感开头顶上');
+
   const entry = getClass(ctx.classId);
-  const rationale = chain?.rationale?.trim()
-    ? clip(chain.rationale, 160)
+  const rationaleFromModel = chain?.rationale?.trim();
+  const rationale = rationaleFromModel
+    ? clip(rationaleFromModel, 160)
     : entry
       ? `${entry.creed} 这一串从「${drafts[0]!.title}」起步，每一步的产出都是下一步的原料。`
       : '这一串从最小的一步开始，每一步的产出都是下一步的原料。';
+  if (!rationaleFromModel) corrections.push('模型没写链的理由，已按职业信条兜底');
 
   return {
     value: {

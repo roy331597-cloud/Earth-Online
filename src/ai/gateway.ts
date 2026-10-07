@@ -291,7 +291,7 @@ const extractServerMessage = (text: string): string | null => {
 export interface PingResult {
   ok: boolean;
   latencyMs: number;
-  /** 给玩家看的那一句话，如「deepseek-chat 响应正常」 */
+  /** 给玩家看的那一句话，如「响应正常」 */
   message: string;
   /** 服务端报告的可用模型（成功时才有） */
   models: string[];

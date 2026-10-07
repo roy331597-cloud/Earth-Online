@@ -964,6 +964,9 @@ try {
   // 但 `achievementIds` 从 Phase 1 起就在那儿：给它塞一枚，
   // 下面"一字不动"那条才有东西可对质（对着一个空数组说"没动"等于没说）
   legacy.unlockables.achievementIds = ['ac_fudan_gravity'];
+  // v7 换的是"精确等于旧默认值"的那份模型名 —— 按史实把这份老档的模型
+  // 填回旧默认，下面"默认值换代"那条断言才有东西可对质
+  legacy.ai.model = 'deepseek-chat';
 
   const migrated = decodeSave(encodeSave(legacy), CURRENT_SCHEMA_VERSION, MIGRATIONS, MIG_NOW);
   truthy('v1 老档 → 迁移成功，而不是分流', migrated.save);
@@ -1026,6 +1029,22 @@ try {
     migrated.save.unlockables.pendingAchievementIds, []);
   check('v5 老档的已解锁名单一字不动',
     migrated.save.unlockables.achievementIds, legacy.unlockables.achievementIds);
+  // v6 → v7：默认模型换代（deepseek-chat → deepseek-flash）。
+  // "不搬立场"的读法：`ai.model` 从来没有过选择入口，老档里的旧值只是
+  // 出厂那一版的默认值本身 —— 默认值换代，老档跟着换代，属于"补数据"。
+  check('v6 老档的默认模型随出厂换代：deepseek-chat → deepseek-flash',
+    migrated.save.ai.model, 'deepseek-flash');
+  check('ai 的其余字段一字不动（换的只是模型名）',
+    [migrated.save.ai.baseUrl, migrated.save.ai.provider, migrated.save.ai.apiKeyStorageKey],
+    [legacy.ai.baseUrl, legacy.ai.provider, legacy.ai.apiKeyStorageKey]);
+  // 边界：只换**精确等于旧默认值**的那一份 —— 将来若真有了模型选择器，
+  // 那一刻起挑过的模型名就是玩家的立场，默认值换代不许把它顶掉
+  const customModel = structuredClone(pristine);
+  customModel.meta.schemaVersion = 6;
+  customModel.ai.model = 'deepseek-reasoner';
+  const keptModel = decodeSave(encodeSave(customModel), CURRENT_SCHEMA_VERSION, MIGRATIONS, MIG_NOW);
+  check('不是旧默认值的模型名（谁挑过的）不许被默认值换代顶掉',
+    keptModel.save.ai.model, 'deepseek-reasoner');
 
   // "只补数据，不搬立场"：迁移不借机改写玩家的记录 —— 拿一条旧任务的标题对质
   check('不搬动已有数据：任务标题原样', migrated.save.quests.byId['q_cb_repro_figure'].title, '复现一张图的尊严');
@@ -2252,6 +2271,24 @@ try {
     brokenH.state.ai.usage.costUsdCents > 0, true);
   check('校验失败的那条调用日志标着 parsedOk=false',
     brokenH.state.agents.invocations.some((l) => l.parsedOk === false && l.errorMessage !== null), true);
+
+  // 但"包装"缺角不该毁内容：这一条是线上真遇到的 —— 回复少写了一句
+  // chain.rationale（「$.chain.rationale：缺少必填字段」），整单被打回模板轨道，
+  // 而模型明明把三步内容都给了。适配器对这句话本来就有诚实的兜底（职业信条），
+  // 校验器却把它列成必填 —— 收紧在了错误的那一层。这里钉住松开之后的行为。
+  const thinChainOut = liveClassOut([liveDraft(1), liveDraft(2), liveDraft(3)]);
+  delete thinChainOut.chain.rationale;
+  const thinFetch = makeFetch(liveDispatch('investor'), thinChainOut);
+  const thinH = harness(toLive(createMockState()), { apiKey: T_KEY, fetchImpl: thinFetch });
+  const thinRes = await thinH.thunks.forgeChain({ idea: LIVE_IDEA, classId: null, deepDeliberation: false });
+  check('少一句 chain.rationale：仍算真身铸的（整单不许被打回模板）',
+    [thinRes.ok, thinRes.source], [true, 'api']);
+  const thinChain = thinH.state.quests.chains[thinRes.data.chainId];
+  check('模型的链标题照用（缺的只是理由，别的没被牵连）', thinChain.title, '真身铸的链');
+  check('兜底的那句理由落了库（职业信条起步句）',
+    thinChain.rationale.includes('真身给的第 1 步') && thinChain.rationale.includes('下一步的原料'), true);
+  check('这一回兜底也留下痕迹（它是证据，不是日志）',
+    thinRes.corrections.some((c) => c.includes('理由')), true);
 
   // 语义层的拦：目录里没有这条职业线
   const ghostFetch = makeFetch(liveDispatch('quantum_chef'), liveClassOut([liveDraft(1), liveDraft(2)]));

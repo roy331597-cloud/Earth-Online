@@ -259,7 +259,7 @@ export function createNewGameState(now: Date = new Date()): EarthOnlineState {
     ai: {
       provider: 'mock',
       baseUrl: 'https://api.deepseek.com',
-      model: 'deepseek-chat',
+      model: 'deepseek-flash',
       apiKeyStorageKey: STORAGE_KEYS.apiKey,
       configured: false,
       mockModeEnabled: true,
