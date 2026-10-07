@@ -4,13 +4,13 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { FloatLayer, useFloatBursts } from '@/components/ui/ExpFloat';
 import { PanelTabs } from '@/components/ui/PanelTabs';
 import { classLabelOf } from '@/data/catalog/classes';
-import { WEEKLY_REWARD_TIERS } from '@/data/catalog/policy';
-import type { WeeklyRewardTierKey } from '@/data/catalog/policy';
+import { DAILY_REWARD_TIERS, WEEKLY_REWARD_TIERS } from '@/data/catalog/policy';
+import type { DailyRewardTierKey, WeeklyRewardTierKey } from '@/data/catalog/policy';
 import { useNow } from '@/hooks/useNow';
 import { cn } from '@/lib/cn';
 import type { PanelKey } from '@/lib/panels';
 import { checkedDailyIds, checkedWeeklyIds, todayKey, weekKeyOf } from '@/lib/selectors';
-import { checkDaily, checkWeekly, createWeekly } from '@/store/operations';
+import { checkDaily, checkWeekly, createDaily, createWeekly } from '@/store/operations';
 import { useEarthOnlineStore, useMutate, useSave } from '@/store/useEarthOnlineStore';
 import type { ClassIdLiteral, DailyDefinition, WeeklyDefinition } from '@/types';
 
@@ -93,32 +93,45 @@ function DailySection() {
   const todayLog = save.dailies.logs[todayKey(now)];
   const done = dailies.filter((d) => checked.has(d.id)).length;
 
+  const [creating, setCreating] = useState(false);
+
   return (
     <section>
-      {dailies.length === 0 ? (
+      {/* 同每周栏：栏名交给标签条，头一行只留进度与今天入账的账。 */}
+      <div className="flex items-baseline justify-between text-[11.5px]">
+        <span className="text-white/55">
+          今日 <span className="numeric text-white/85">{done}</span> / {dailies.length}
+        </span>
+        <span className="numeric text-[11px] text-white/45">+{todayLog?.expEarned ?? 0} EXP</span>
+      </div>
+      <ProgressBar ratio={dailies.length === 0 ? 0 : done / dailies.length} />
+
+      {dailies.length === 0 && !creating ? (
         <EmptyHint text="还没有任何日常。日常只能由你自己写下来 —— 系统不会替你安排生活。" />
       ) : (
-        <>
-          {/* 栏名已由标签条给出，这里不再重复；头一行只留进度与今天入账的账。 */}
-          <div className="flex items-baseline justify-between text-[11.5px]">
-            <span className="text-white/55">
-              今日 <span className="numeric text-white/85">{done}</span> / {dailies.length}
-            </span>
-            <span className="numeric text-[11px] text-white/45">+{todayLog?.expEarned ?? 0} EXP</span>
-          </div>
-          <ProgressBar ratio={dailies.length === 0 ? 0 : done / dailies.length} />
-
-          <ul className="mt-3 space-y-2">
-            {dailies.map((d) => (
-              <DailyRow key={d.id} def={d} checked={checked.has(d.id)} />
-            ))}
-          </ul>
-
-          <p className="mt-3 text-[10.5px] leading-relaxed text-white/30">
-            打钩即发奖，一天一次；跨天未打钩会在结算时扣该条日常的 EXP，连击归零。
-          </p>
-        </>
+        <ul className="mt-3 space-y-2">
+          {dailies.map((d) => (
+            <DailyRow key={d.id} def={d} checked={checked.has(d.id)} />
+          ))}
+        </ul>
       )}
+
+      {/* 创建入口。红线照旧：写下来的笔只有玩家能拿 —— 所以按钮叫「写一条」，不叫「生成」 */}
+      {creating ? (
+        <DailyCreateForm onDone={() => setCreating(false)} />
+      ) : (
+        <button
+          type="button"
+          onClick={() => setCreating(true)}
+          className="mt-3 w-full rounded-lg border border-dashed border-white/20 py-2 text-[11.5px] text-white/55 transition-all duration-300 ease-cinematic hover:border-amber-400/45 hover:text-amber-200"
+        >
+          ＋ 写一条每日任务
+        </button>
+      )}
+
+      <p className="mt-3 text-[10.5px] leading-relaxed text-white/30">
+        日常只能由你自己写。打钩即发奖，一天一次；跨天未打钩会在结算时扣该条日常的 EXP，连击归零。
+      </p>
     </section>
   );
 }
@@ -240,6 +253,105 @@ function DailyRow({ def, checked }: { def: DailyDefinition; checked: boolean }) 
         onCancel={() => setConfirming(false)}
       />
     </li>
+  );
+}
+
+/**
+ * 写一条日常。
+ *
+ * 与 WeeklyCreateForm 是同款三字段（标题 / 职业线 / 三档重量）——
+ * 两栏的手感必须一模一样，改这份时看一眼对面那份。
+ * 唯一的差别是刻度：日常用 DAILY_REWARD_TIERS（周常刻度的一半）。
+ */
+function DailyCreateForm({ onDone }: { onDone: () => void }) {
+  const save = useSave();
+  const mutate = useMutate();
+  const [title, setTitle] = useState('');
+  const [classId, setClassId] = useState<ClassIdLiteral | null>(null);
+  const [tier, setTier] = useState<DailyRewardTierKey>('medium');
+
+  const ready = title.trim().length > 0;
+  const selectedTier = DAILY_REWARD_TIERS.find((t) => t.key === tier) ?? DAILY_REWARD_TIERS[1];
+
+  const submit = () => {
+    if (!ready) return;
+    mutate((s) => createDaily(s, { title: title.trim(), classId, rewardExp: selectedTier.exp }, new Date()));
+    onDone();
+  };
+
+  return (
+    <div className="mt-3 rounded-xl border border-amber-400/25 bg-amber-400/[0.05] p-3.5">
+      <input
+        type="text"
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        maxLength={40}
+        placeholder="每天都要做的那一件小事…"
+        aria-label="每日任务标题"
+        className="w-full rounded-lg border border-white/[0.12] bg-ink-950/45 px-3 py-2.5 text-[12.5px] text-white placeholder:text-white/30 focus:border-amber-400/40 focus:outline-none focus:ring-1 focus:ring-amber-400/30"
+      />
+
+      {/* 归属职业线。通用永远排第一 —— "不给它挂任何线"必须是默认选项 */}
+      <div className="mt-2.5 flex flex-wrap gap-1.5">
+        <ChoiceChip active={classId === null} onClick={() => setClassId(null)}>
+          通用
+        </ChoiceChip>
+        {save.careers.tracks.map((t) => (
+          <ChoiceChip key={t.classId} active={classId === t.classId} onClick={() => setClassId(t.classId)}>
+            {classLabelOf(t.classId)}
+          </ChoiceChip>
+        ))}
+      </div>
+
+      {/* 三档重量 */}
+      <div className="mt-2.5 grid grid-cols-3 gap-1.5">
+        {DAILY_REWARD_TIERS.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            aria-pressed={tier === t.key}
+            onClick={() => setTier(t.key)}
+            className={cn(
+              'rounded-lg border px-2 py-2 text-center transition-all duration-300 ease-cinematic',
+              tier === t.key
+                ? 'border-amber-400/50 bg-amber-400/[0.12]'
+                : 'border-white/[0.12] bg-white/[0.03] hover:border-white/25',
+            )}
+          >
+            <div className={cn('text-[12px]', tier === t.key ? 'text-amber-200' : 'text-white/70')}>{t.label}</div>
+            <div className="numeric mt-0.5 text-[10.5px] text-white/40">{t.exp} EXP</div>
+          </button>
+        ))}
+      </div>
+      <p className="mt-1.5 text-[10.5px] leading-relaxed text-white/35">{selectedTier.hint}</p>
+
+      <div className="mt-3 flex gap-2">
+        <button
+          type="button"
+          onClick={onDone}
+          className="glass-pill glass-hover flex-1 py-2 text-[12px] text-white/60"
+        >
+          算了
+        </button>
+        <button
+          type="button"
+          disabled={!ready}
+          onClick={submit}
+          className={cn(
+            'flex-[1.4] rounded-lg border py-2 text-[12px] transition-all duration-300 ease-cinematic',
+            ready
+              ? 'border-amber-400/50 bg-amber-400/15 font-medium text-amber-200 hover:scale-[1.02] hover:bg-amber-400/25'
+              : 'cursor-not-allowed border-white/10 bg-white/[0.04] text-white/30',
+          )}
+        >
+          写下来
+        </button>
+      </div>
+
+      <p className="mt-2.5 text-[10.5px] leading-relaxed text-white/30">
+        AI 只会向你推荐，采纳与否在你 —— 但写下来的这支笔，只有你能拿。
+      </p>
+    </div>
   );
 }
 

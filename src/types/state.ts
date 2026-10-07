@@ -303,6 +303,26 @@ export type CreateWeekly = (
 ) => EarthOnlineState;
 
 /**
+ * 新建一条每日任务。
+ *
+ * 🔴 与每周同一条红线：**只能由玩家创建**。系统与 AI 都不得自动创建、
+ *    不得自动启用、不得自动修改 —— 这个契约的调用方只允许是玩家的提交动作。
+ *    AI 唯一的入口是推荐，采纳通路见 DailyRecommendation（推荐与定义分离）。
+ *
+ * penaltyExp 由 rewardExp × RewardPolicy.dailyMissPenaltyMultiplier 在创建时定格。
+ */
+export type CreateDaily = (
+  state: EarthOnlineState,
+  input: {
+    title: string;
+    /** 所属职业线；null 为通用日常 */
+    classId: import('./core').ClassIdLiteral | null;
+    rewardExp: number;
+  },
+  now: Date,
+) => EarthOnlineState;
+
+/**
  * 把一点待分配属性点花在某一维上。
  *
  * 设计立场（PO 裁定）：属性点**只能**手动分配 —— 保留"我在长成什么样"的主动权。
@@ -399,6 +419,32 @@ export type CreateContactQuest = (
   state: EarthOnlineState,
   contactId: string,
   input: { title: string },
+  now: Date,
+) => EarthOnlineState;
+
+/**
+ * 玩家亲手写一条任务，**直接写入「进行中」**。
+ *
+ * 与 CreateContactQuest 同一条理由：审核闸门（draft → offered）是给
+ * AI 生成物设的，防的是"系统替你做决定"；这一条出自玩家自己的手笔 ——
+ * 没有需要防的东西。所以它一步到位 status: 'active'，不进 draft、不必领取。
+ *
+ * 与「从灵感铸链」（GenerateQuestChain）分工也清楚：那条链由 AI 拆成多步、
+ * 全部落在 draft 等玩家裁决；这一条是玩家已经想好要做的一件事，系统只负责记下来。
+ *
+ * rewardExp 由三档刻度选入（见 catalog/policy 的 QUEST_REWARD_TIERS），
+ * 落库前仍走 maxExpPerQuest 封顶；effortEstimate 由 difficulty 推导，
+ * 不需要玩家填工时。
+ */
+export type CreateManualQuest = (
+  state: EarthOnlineState,
+  input: {
+    title: string;
+    /** 归属职业线；null 为通用 */
+    classId: import('./core').ClassIdLiteral | null;
+    rewardExp: number;
+    difficulty: import('./core').Difficulty;
+  },
   now: Date,
 ) => EarthOnlineState;
 

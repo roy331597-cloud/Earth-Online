@@ -21,6 +21,8 @@
 //   ㉚ 终局目标引擎（点亮、重算、圣殿视图）
 //   ㉛ 出厂封装（PWA 清单 / iOS meta / Docker / nginx / compose + Caddy / README / 裸机配置）
 //   ㉜ 出厂清场（空档：结构完整 / 引用隔离 / 全空清单 / 漏斗空转两遍）
+//   ㉝ 手写每日（第二支笔：写下来 / 惩罚定格 / 拒绝路径）
+//   ㉞ 手写任务（直接进「进行中」）  ㉟ 出题处方（两份素材、雾不外泄）
 //
 // ①–⑨ 验的是**写**（状态怎么流转）；⑩–⑬ 验的是**读**（selector 从状态里读出什么）。
 // 读错了不抛异常，只会安静地显示一个错的东西 —— 所以更值得钉住。
@@ -125,6 +127,17 @@
 //    以及**漏斗空转两遍**（第一遍只许派生 Ch.1 的条件行，第二遍原引用返回）。
 //    这类错全都不会崩：多留一条 daily，玩家会以为是自己建的；少拷一层目录，
 //    点亮的格子会反向污染模板；凭空点亮一格，是最难查的那种"我没做过啊"。
+//
+// ㉝ 是每日任务的第二支笔：① 钉的是打钩，这一节钉**写下来** —— 每日任务
+//    第一次有了玩家自己的输入口。红线与周常同句（新建的一律记 player_created，
+//    系统与 AI 都不得代笔），惩罚在创建时定格，拒绝路径原对象返回。
+//
+// ㉞–㉟ 是"任务从哪来"的另一半（悬赏板的两条来源）：㉞ 手写的任务一步进
+//    「进行中」（与联系人派生任务同一条理由：闸门防的是"系统替你做决定"）；
+//    ㉟ 调度员按处境出的题、圣殿按目标拆的链 —— 素材由 `lib/questBriefs`
+//    组合，产出一律落「待议」（与灵感框同一条闸门）。㉟ 里最要紧的一条是
+//    **雾不外泄**：藏着的格子一旦进了素材，玩家会在草稿里读到本该自己发现的
+//    那一格 —— 错了不会崩，只会剧透。
 //
 // 还有一条只有这条脚本能钉住的东西：**纯函数的拒绝路径必须原对象返回**。
 // 全项目所有 operation 都遵守这条自律（见 operations.ts），而它一旦破掉，
@@ -4095,6 +4108,141 @@ try {
   truthy('store 的建档 / 重置路径全部指向 newGameState',
     storeSrc.includes("from './newGameState'") && !storeSrc.includes('createMockState')
       && !storeSrc.includes('resetToMock'));
+
+  // -------------------------------------------------------------------------
+  console.log('\n【㉝ 手写每日：CreateDaily（第二支笔）】');
+  // -------------------------------------------------------------------------
+  // ① 钉的是打钩（第一支笔），这一节钉第二支笔 —— **写下来**。
+  // 红线与周常同句（⑰ 末尾那组）：新建的一律记 player_created，系统与 AI 都不得代笔。
+  const { createDaily } = await server.ssrLoadModule('/src/store/operations.ts');
+  const dc0 = createNewGameState(CLEAN_NOW);
+
+  check('空标题（含全空格）→ 原对象返回',
+    createDaily(dc0, { title: '   ', classId: null, rewardExp: 40 }, CLEAN_NOW) === dc0, true);
+
+  const dc1 = createDaily(dc0, { title: '  喝够两升水  ', classId: null, rewardExp: 40 }, CLEAN_NOW);
+  const dcNew = dc1.dailies.definitions.at(-1);
+  check('红线：写下来的一律记为玩家创建，且不挂任何推荐来源',
+    [dcNew.origin, dcNew.adoptedFromRecommendationId], ['player_created', null]);
+  check('标题已 trim，四个定值一次到位（一天一次 / 无时间窗 / 立即可打钩）',
+    [dcNew.title, dcNew.targetPerDay, dcNew.window, dcNew.enabled],
+    ['喝够两升水', 1, null, true]);
+  check('惩罚在创建时定格：40 × 1.5', [dcNew.reward.exp, dcNew.penaltyExp], [40, 60]);
+  check('新日常从 0 起数，且计入连击',
+    [dcNew.streak, dcNew.bestStreak, dcNew.countsForStreak], [0, 0, true]);
+  check('id 形态 d_<时间戳>_<序号>', /^d_[0-9a-z]+_\d+$/.test(dcNew.id), true);
+  check(
+    '奖励封顶走同一枚旋钮（改政策不影响已创建的条目）',
+    createDaily(dc0, { title: '巨款', classId: null, rewardExp: 999999 }, CLEAN_NOW)
+      .dailies.definitions.at(-1).reward.exp,
+    dc0.settings.rewardPolicy.maxExpPerQuest,
+  );
+  check('只动 dailies 一个分节（其余分节连引用都不换）',
+    Object.keys(dc0).filter((k) => dc1[k] !== dc0[k]), ['dailies']);
+  check('入参未被就地修改', dc0.dailies.definitions.length, 0);
+
+  const dc2 = createDaily(dc1, { title: '再一条', classId: null, rewardExp: 80 }, CLEAN_NOW);
+  check('同一毫秒连建两条，id 不撞（末尾缀已有条数）',
+    new Set(dc2.dailies.definitions.map((d) => d.id)).size, 2);
+
+  // 闭环：写下来的日常，当场就出现在待办里、当场就能打钩
+  const dcToday = localDateKey(CLEAN_NOW);
+  truthy('新写的那条立刻出现在今日待打钩里',
+    pendingDailies(dc1, CLEAN_NOW).some((d) => d.id === dcNew.id));
+  const dc3 = checkDaily(dc1, dcNew.id, CLEAN_NOW);
+  check('写完即可打钩：当日 EXP 入账（0 连击没有加成，发多少就是多少）',
+    dc3.dailies.logs[dcToday]?.expEarned, 40);
+  check('连击 0 → 1', dc3.dailies.definitions.find((d) => d.id === dcNew.id)?.streak, 1);
+
+  // 挂线创建：打钩发奖就记到那条线上
+  const dc4 = createDaily(dc0, { title: '读一页论文', classId: 'computational_biology', rewardExp: 80 }, CLEAN_NOW);
+  const dc5 = checkDaily(dc4, dc4.dailies.definitions.at(-1).id, CLEAN_NOW);
+  const dcTrack = dc5.careers.tracks.find((t) => t.classId === 'computational_biology');
+  check('挂线创建的日常：这 80 EXP 记到那条线上', [dcTrack.exp, dcTrack.level], [80, 1]);
+
+  // -------------------------------------------------------------------------
+  console.log('\n【㉞ 手写任务：CreateManualQuest（悬赏板上的第二支笔）】');
+  // -------------------------------------------------------------------------
+  // 与 createContactQuest 同一条理由：审核闸门防的是"系统替玩家做决定"，
+  // 玩家亲手写的没有需要防的东西 —— 所以它**一步到位进「进行中」**。
+  const { createManualQuest } = await server.ssrLoadModule('/src/store/operations.ts');
+  const mq0 = createNewGameState(CLEAN_NOW);
+
+  check('空标题（含全空格）→ 原对象返回',
+    createManualQuest(mq0, { title: '   ', classId: null, rewardExp: 150, difficulty: 2 }, CLEAN_NOW) === mq0, true);
+
+  const mq1 = createManualQuest(mq0, { title: '  读完那本书  ', classId: null, rewardExp: 150, difficulty: 2 }, CLEAN_NOW);
+  const mqQuest = mq1.quests.byId[mq1.quests.order.at(-1)];
+  check('标题已 trim', mqQuest.title, '读完那本书');
+  check('一步到位：直接是「进行中」，没有领取与开始两道仪式',
+    [mqQuest.status, mqQuest.claimedAt, mqQuest.startedAt], ['active', cleanNowIso, cleanNowIso]);
+  check('红线：不是 AI 的稿子 —— agentId 缺席，sourceIdea 记玩家写的那句话',
+    [mqQuest.origin.agentId, mqQuest.origin.sourceIdea], [null, '读完那本书']);
+  check('定值：side / 无链 / 不是从哪一步改出来的',
+    [mqQuest.type, mqQuest.chain, mqQuest.origin.reroutedFrom, mqQuest.origin.rerouteHistory],
+    ['side', null, null, []]);
+  check('id 形态 q_own_<时间戳>_<序号>', /^q_own_[0-9a-z]+_\d+$/.test(mqQuest.id), true);
+  check('order 与 byId 同写（两处都找得到它）',
+    [mq1.quests.order.includes(mqQuest.id), mq1.quests.byId[mqQuest.id] === mqQuest], [true, true]);
+  check('难度连同工时预算一起定格（2★ → 约 2 小时）',
+    [mqQuest.difficulty, mqQuest.effortEstimate.unit, mqQuest.effortEstimate.value], [2, 'hour', 2]);
+  const mqRich = createManualQuest(mq0, { title: '巨款', classId: null, rewardExp: 999999, difficulty: 3 }, CLEAN_NOW);
+  check('奖励封顶走同一枚旋钮（改政策不影响已写下的）',
+    mqRich.quests.byId[mqRich.quests.order.at(-1)].reward.exp,
+    mq0.settings.rewardPolicy.maxExpPerQuest);
+  check('只动 quests 一个分节（其余分节连引用都不换）',
+    Object.keys(mq0).filter((k) => mq1[k] !== mq0[k]), ['quests']);
+  check('入参未被就地修改', mq0.quests.order.length, 0);
+
+  const mq2 = createManualQuest(mq1, { title: '再写一条', classId: 'computational_biology', rewardExp: 60, difficulty: 1 }, CLEAN_NOW);
+  check('同一毫秒连写两条，id 不撞', new Set(mq2.quests.order).size, 2);
+  check('挂线的任务带上职业线（完成后经验就记到那条线上）',
+    mq2.quests.byId[mq2.quests.order.at(-1)].classId, 'computational_biology');
+
+  // 闭环：写下的任务当场进「进行中」，当场就能开工
+  const mqId = mq2.quests.order.at(-1);
+  truthy('写下的任务当场出现在「进行中」', inProgressQuests(mq2).some((q) => q.id === mqId));
+  const mqTurnIn = openTurnIn(mq2, mqId, CLEAN_NOW);
+  check('写完就能收工（点击完成 → 待结算）', mqTurnIn.quests.byId[mqId].status, 'turn_in_pending');
+
+  // -------------------------------------------------------------------------
+  console.log('\n【㉟ 出题处方：两份素材，雾不外泄】');
+  // -------------------------------------------------------------------------
+  // 「让调度员出题」与「拆解成任务链」把**处境**组一句话交给铸链管线。
+  // 两条铁律由纯函数钉住：①方向对（素材里确实有目标 / 篇章）；
+  // ②**藏着的格子绝不进素材** —— 泄露不会崩，只会剧透玩家该自己发现的东西。
+  const { composeCommissionBrief, composeGoalBrief } = await server.ssrLoadModule('/src/lib/questBriefs.ts');
+  const qb0 = createMockState();
+
+  const commission = composeCommissionBrief(qb0);
+  truthy('处方组得出来（不等于 null）', commission !== null);
+  const focusedTitle = CH_ALL.find((c) => c.id === qb0.chapters.focusedChapterId).title;
+  truthy('处方里带着眼下这一章', commission.includes(focusedTitle));
+  truthy('处方里带着一个终极目标', qb0.endgame.goals.some((g) => commission.includes(g.title)));
+
+  const hiddenBits = qb0.endgame.goals.flatMap((g) =>
+    g.milestones.filter((m) => m.hidden && m.achievedAt === null).flatMap((m) => [m.title, m.criterion]));
+  truthy('夹具里确实有藏着的格子（断言的前提）', hiddenBits.length > 0);
+  check('调度员的处方不泄露任何藏着的格子', hiddenBits.filter((t) => commission.includes(t)), []);
+
+  const linkedGoal = qb0.endgame.goals.find(
+    (g) => !g.achieved && qb0.careers.tracks.some((t) => t.linkedGoalIds.includes(g.id)));
+  truthy('夹具前提：有一个挂在职业线上的未达成目标', Boolean(linkedGoal));
+  const goalBrief = composeGoalBrief(qb0, linkedGoal.id);
+  check('挂线的目标：处方带上去那条线的归属',
+    goalBrief.classId, qb0.careers.tracks.find((t) => t.linkedGoalIds.includes(linkedGoal.id)).classId);
+  truthy('处方里带着目标名', goalBrief.idea.includes(linkedGoal.title));
+  check('未知目标 → null（按钮点不出东西的情况也关得住）', composeGoalBrief(qb0, 'NO_SUCH_GOAL'), null);
+
+  for (const g of qb0.endgame.goals) {
+    const b = composeGoalBrief(qb0, g.id);
+    if (b === null) continue;
+    const leaked = g.milestones
+      .filter((m) => m.hidden && m.achievedAt === null)
+      .flatMap((m) => [m.title, m.criterion])
+      .filter((t) => b.idea.includes(t));
+    check(`目标「${g.title}」的拆解处方不泄露藏着的格子`, leaked, []);
+  }
 
 } catch (err) {
   failed += 1;

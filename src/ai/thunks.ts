@@ -104,6 +104,16 @@ export type ThunkResult<T> =
   | { ok: false; message: string };
 
 /**
+ * 铸链的入口语境。**只影响对玩家说的话** —— 失败提示与等待文案里
+ * "你的东西还在哪"；三条路走的是同一根管线（调度 → 生成 → 落「待议」）。
+ *
+ *   spark      —— 灵感框。失败了，那段话还在框里。
+ *   commission —— 悬赏板「让调度员出题」。没有框，素材是系统自己组的处境。
+ *   goal       —— 圣殿「拆解成任务链」。素材是目标卡上的那一格里程碑。
+ */
+export type ForgeSource = 'spark' | 'commission' | 'goal';
+
+/**
  * 一条要弹给玩家的提示。
  *
  * `action` 是 PO 要的那个「一键切换至 Mock 模式」——
@@ -421,6 +431,11 @@ export const createThunks = (deps: ThunkDeps) => {
   /**
    * 从一句灵感铸造一条链：调度 → 生成 →（可选）深度推演 → 落「待议」。
    *
+   * 三个入口共用它：灵感框（玩家自己写的句子）、悬赏板的「让调度员出题」
+   * （素材 = 聚焦篇章 + 最近的终极目标）、圣殿的「拆解成任务链」
+   * （素材 = 某个目标未点亮的那一格）。后两个的素材由 `lib/questBriefs`
+   * 组合，落到这里都只是同一句 `idea`。
+   *
    * 落库仍然走 `generateQuestChain`，产出仍然**全部落在 `draft`** ——
    * 铸造 ≠ 生效这条规则没有因为接上真身而松动。
    */
@@ -428,11 +443,25 @@ export const createThunks = (deps: ThunkDeps) => {
     idea: string;
     classId: ClassIdLiteral | null;
     deepDeliberation: boolean;
+    /** 入口语境（见 ForgeSource）。不影响管线，只决定"东西还在哪"那句话怎么说 */
+    from?: ForgeSource;
   }): Promise<ThunkResult<{ chainId: string; classId: ClassIdLiteral; stepCount: number }>> => {
     const state0 = deps.getState();
     const now = clock();
     const idea = input.idea.trim();
     if (idea.length === 0) return { ok: false, message: '还没有写下任何想法。' };
+
+    // 失败时那句"你的东西还在哪"按入口换：灵感框里的话当然还在框里，
+    // 而「让调度员出题」「拆解成任务链」没有框 —— 说"灵感还在框里"
+    // 会让玩家去找一个不存在的东西。
+    const from = input.from ?? 'spark';
+    const retry = from === 'spark' ? '灵感还在框里，再试一次。' : '再试一次。';
+    const routeLabel =
+      from === 'commission'
+        ? '调度员正在看你的近况…'
+        : from === 'goal'
+          ? '正在把它拆成能落地的几步…'
+          : '正在辨认这段想法属于哪条线…';
 
     const corrections: string[] = [];
     // 一次点击 = 一条提示。深推演会连叫两个 Agent，若两次都因同一个原因（比如余额见底）
@@ -451,12 +480,12 @@ export const createThunks = (deps: ThunkDeps) => {
         agentId: agent.id,
         agentName: agent.name,
         purpose: 'route_idea',
-        label: '正在辨认这段想法属于哪条线…',
+        label: routeLabel,
         rolePrompt: ROLE_PROMPTS.dispatcher,
         payload: buildDispatcherPayload(state0, { idea, deepDeliberation: input.deepDeliberation }),
         mock: () => mockDispatcherDecision(idea),
       }, said);
-      if (run === null) return { ok: false, message: '调度员这次没接上。灵感还在框里，再试一次。' };
+      if (run === null) return { ok: false, message: `调度员这次没接上。${retry}` };
       decision = run.data;
       source = mergeSource(source, run.source);
       corrections.push(...run.corrections);
@@ -490,7 +519,7 @@ export const createThunks = (deps: ThunkDeps) => {
             .filter((t): t is string => typeof t === 'string'),
         }),
     }, said);
-    if (classRun === null) return { ok: false, message: '生成这一步没接上。灵感还在框里，再试一次。' };
+    if (classRun === null) return { ok: false, message: `生成这一步没接上。${retry}` };
     const classOut: ClassAgentOutput = classRun.data;
     source = mergeSource(source, classRun.source);
     corrections.push(...classRun.corrections);

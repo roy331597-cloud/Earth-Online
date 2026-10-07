@@ -2,9 +2,9 @@
 // EarthOnline · 状态推进纯函数（Phase 3 前哨）
 //
 // 这里把 Phase 1 冻结的契约逐条落成真实现：
-//   CheckDaily / CheckWeekly / CreateWeekly / StartQuest / OpenTurnIn /
-//   CompleteQuest / SpendAttributePoint / AskNetworkAdvisor /
-//   ConsultNetworkSolver / CreateContactQuest / RunDailyRollover
+//   CheckDaily / CheckWeekly / CreateDaily / CreateWeekly / CreateManualQuest /
+//   StartQuest / OpenTurnIn / CompleteQuest / SpendAttributePoint /
+//   AskNetworkAdvisor / ConsultNetworkSolver / CreateContactQuest / RunDailyRollover
 // 每个函数的类型都直接标注为契约类型本身（而非等价签名），
 // 于是**签名一旦漂移，tsc 就报错** —— 契约是编译期锁住的，不靠注释自觉。
 //
@@ -46,12 +46,15 @@ import type {
   Contact,
   CreateContact,
   CreateContactQuest,
+  CreateDaily,
+  CreateManualQuest,
   SetContactStage,
   CreateWeekly,
   DailyDefinition,
   DailyId,
   DailyLog,
   DateKey,
+  Difficulty,
   DismissChapterCeremony,
   EarthOnlineState,
   EmotionTag,
@@ -327,7 +330,7 @@ const ingestMilestones = (
 };
 
 // ---------------------------------------------------------------------------
-// 1. 日常打钩：CheckDaily
+// 1. 日常：CheckDaily / CreateDaily
 // ---------------------------------------------------------------------------
 
 /**
@@ -399,6 +402,54 @@ export const checkDaily: CheckDaily = (state, dailyId, now) => {
   }
 
   return next;
+};
+
+/**
+ * 新建一条每日任务。
+ *
+ * 🔴 红线（与每周一致）：**只能由玩家创建**。本函数是那条红线的实现 ——
+ *    它是 `dailies.definitions` 唯一的写入点（迁移补空数组不算"创建"）；
+ *    将来 AI 推荐走采纳通路（ResolveDailyRecommendation 契约），那是另一扇门。
+ *    与 `createWeekly` 互为镜像：改一份就该看一眼另一份。
+ *
+ * 四个字段的定值理由：
+ *   · `targetPerDay: 1` —— 一天一钩（幂等键是当日 checkedIds，见 CheckDaily），表单也不问次数；
+ *   · `window: null` —— 时段约束目前只展示、不拦截，先不给创建开这个口子；
+ *   · `iconKey: ''` —— Phase 2 的图标/场景锚点，玩家手写的条目暂无图标；
+ *   · `penaltyExp` 与周常同款：按 `rewardExp × dailyMissPenaltyMultiplier` 在创建时定格，
+ *     之后改政策不影响已创建的条目。
+ */
+export const createDaily: CreateDaily = (state, input, now) => {
+  const title = input.title.trim();
+  if (title.length === 0) return state;
+
+  const policy = state.settings.rewardPolicy;
+  const exp = Math.max(0, Math.min(Math.round(input.rewardExp), policy.maxExpPerQuest));
+
+  const def: DailyDefinition = {
+    // 末尾缀上已有条数：同一毫秒内连建两条时时间戳会撞（人点不了那么快，断言脚本可以）
+    id: `d_${now.getTime().toString(36)}_${state.dailies.definitions.length}` as DailyId,
+    title,
+    origin: 'player_created',
+    adoptedFromRecommendationId: null,
+    classId: input.classId,
+    targetPerDay: 1,
+    reward: { exp },
+    penaltyExp: Math.round(exp * policy.dailyMissPenaltyMultiplier),
+    iconKey: '',
+    countsForStreak: true,
+    streak: 0,
+    bestStreak: 0,
+    enabled: true,
+    window: null,
+    createdAt: iso(now),
+    archivedAt: null,
+  };
+
+  return {
+    ...state,
+    dailies: { ...state.dailies, definitions: [...state.dailies.definitions, def] },
+  };
 };
 
 // ---------------------------------------------------------------------------
@@ -1257,6 +1308,96 @@ export const createContactQuest: CreateContactQuest = (state, contactId, input, 
       reviewed: false,
       reviewerNote: null,
       // 它出自玩家自己的决定，不是从哪一步改出来的
+      reroutedFrom: null,
+      rerouteHistory: [],
+    },
+    grant: null,
+    journalEntryId: null,
+    createdAt: ts,
+    claimedAt: ts,
+    startedAt: ts,
+    turnInOpenedAt: null,
+    completedAt: null,
+    actualEffortMinutes: null,
+  };
+
+  return {
+    ...state,
+    quests: {
+      ...state.quests,
+      order: [...state.quests.order, id],
+      byId: { ...state.quests.byId, [id]: quest },
+    },
+  };
+};
+
+/**
+ * 手写一条任务时的"工时预算"：难度只给星级，工时由这张小表推导。
+ *
+ * 星级是给玩家的重量感，工时是落在卡片上的"大概要花多久"——
+ * 两个都不精确，也都不该让玩家自己填。数字取整不取奇：
+ * 一个工作日 = 2h（晚上+碎片），一天 = 6h，都不是字面意义。
+ */
+const EFFORT_BY_DIFFICULTY: Record<Difficulty, { unit: 'min' | 'hour' | 'day'; value: number }> = {
+  1: { unit: 'min', value: 30 },
+  2: { unit: 'hour', value: 2 },
+  3: { unit: 'hour', value: 6 },
+  4: { unit: 'day', value: 2 },
+  5: { unit: 'day', value: 7 },
+};
+
+/**
+ * 玩家亲手写一条任务，**直接写入「进行中」**。
+ *
+ * 与 createContactQuest 同一条理由：审核闸门（draft → offered）是给
+ * AI 生成物设的，防的是"系统替你做决定"；这一条出自玩家自己的手笔 ——
+ * 没有需要防的东西。所以它一步到位：status 直接是 'active'，
+ * claimedAt / startedAt 都盖在建档这一刻，没有领取与开始两道仪式。
+ *
+ * 与「从灵感铸链」的分工：那条链由 AI 拆成多步、全部落 draft 等裁决；
+ * 这一条是玩家已经想好的一件事，系统只负责把它记下来。
+ */
+export const createManualQuest: CreateManualQuest = (state, input, now) => {
+  const title = input.title.trim();
+  if (title.length === 0) return state;
+
+  const policy = state.settings.rewardPolicy;
+  const exp = Math.max(0, Math.min(Math.round(input.rewardExp), policy.maxExpPerQuest));
+  const difficulty = Math.min(5, Math.max(1, Math.round(input.difficulty))) as Difficulty;
+
+  const ts = iso(now);
+  const id = `q_own_${now.getTime().toString(36)}_${state.quests.order.length}` as QuestId;
+
+  const quest: Quest = {
+    id,
+    classId: input.classId,
+    type: 'side',
+    status: 'active',
+    title,
+    subtitle: '自己写下来的一条 —— 做完它，档案里就多一段只属于你的记录。',
+    narrative:
+      '这件事没有什么名目，只因为你想做。你把它写了下来，它就不再只是一闪而过的念头 —— 接下来，只剩下做。',
+    objective: title,
+    difficulty,
+    effortEstimate: EFFORT_BY_DIFFICULTY[difficulty],
+    reward: { exp },
+    outcomeHints: [],
+    linkedGoalIds: [],
+    linkedAttributes: [],
+    linkedContactIds: [],
+    prerequisiteQuestIds: [],
+    dueHint: null,
+    proof: null,
+    tags: ['自写'],
+    chain: null,
+    origin: {
+      // 它不是 AI 生成的稿子：sourceIdea 记玩家写下的那句话，agentId 留 null
+      // （与 createContactQuest 同一套记号）
+      agentId: null,
+      sourceIdea: title,
+      generatedAt: ts,
+      reviewed: false,
+      reviewerNote: null,
       reroutedFrom: null,
       rerouteHistory: [],
     },

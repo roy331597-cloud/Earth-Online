@@ -1,12 +1,17 @@
+import { useState } from 'react';
 import { cn } from '@/lib/cn';
 import { formatDateKeyCN, localDateKey } from '@/lib/format';
+import { InlineError } from '@/components/ui/InlineError';
 import { PeekBanner } from '@/components/panels/EvolutionSection';
 import { PanelShell } from '@/components/panels/PanelShell';
+import { useAgentAction } from '@/hooks/useAgentAction';
 import type { PanelKey } from '@/lib/panels';
+import { composeGoalBrief } from '@/lib/questBriefs';
 import { endgameView, evolutionView } from '@/lib/selectors';
 import type { ClearComponentView, GoalMilestoneView, GoalView } from '@/lib/selectors';
+import { thunks } from '@/store/agentRuntime';
 import { useEarthOnlineStore, useSave } from '@/store/useEarthOnlineStore';
-import type { ISODateTime } from '@/types';
+import type { GoalIdLiteral, ISODateTime } from '@/types';
 
 interface SanctuaryPanelProps {
   panel: PanelKey;
@@ -25,6 +30,8 @@ interface SanctuaryPanelProps {
  *   ② 五张终极目标卡。每一格里程碑都在卡里：亮了的带日期，
  *      没亮的带条件，**藏着的连名字都不给**（闸门在 selectors.endgameView
  *      那边就关好了 —— 这里就算忘了判 null，也拿不到那个名字）。
+ *      卡上只有一处交互：没达成的目标可以「拆解成任务链」——交给调度员
+ *      拆成几步落在「待议」（这一页只留一行结果，逐条裁决是悬赏那边的事）。
  *   ③ 至高科技树，压在最底下当远景。它有自己的雾（与档案馆同源）：
  *      雾里只给空槽，雾散才给数字。**它不进上面的综合进度** ——
  *      树不设终点，算进去会让数字在掀雾那天回跌（见 selectors 的注释）。
@@ -35,6 +42,32 @@ interface SanctuaryPanelProps {
 export function SanctuaryPanel({ panel, onClose }: SanctuaryPanelProps) {
   const save = useSave();
   const view = endgameView(save);
+
+  // 「拆解成任务链」：把某个目标交给调度员拆成一串能落地的步骤。
+  // 产出一律落「待议」（与灵感框同一条闸门）—— 这一页只留一行结果，
+  // 不把草稿搬进来：圣殿回答"我要去的地方长什么样"，
+  // 逐条过目是悬赏中枢那边的事。
+  const [decomposingId, setDecomposingId] = useState<string | null>(null);
+  const [decomposed, setDecomposed] = useState<{ goalId: string; stepCount: number } | null>(null);
+  const { busy, error, run, clearError } = useAgentAction();
+
+  const decompose = (goalId: GoalIdLiteral) => {
+    if (busy) return;
+    setDecomposed(null);
+    setDecomposingId(goalId);
+    void run(async () => {
+      const brief = composeGoalBrief(save, goalId);
+      if (brief === null) return { ok: false as const, message: '这个目标已经达成了 —— 它不需要拆了。' };
+      const result = await thunks.forgeChain({
+        idea: brief.idea,
+        classId: brief.classId,
+        deepDeliberation: false,
+        from: 'goal',
+      });
+      if (result.ok) setDecomposed({ goalId, stepCount: result.data.stepCount });
+      return result;
+    }).finally(() => setDecomposingId(null));
+  };
 
   return (
     <PanelShell panel={panel} onClose={onClose}>
@@ -72,8 +105,22 @@ export function SanctuaryPanel({ panel, onClose }: SanctuaryPanelProps) {
 
       {/* ================= 五个很远的地方 ================= */}
       {view.goals.map((goal) => (
-        <GoalCard key={goal.id} goal={goal} />
+        <GoalCard
+          key={goal.id}
+          goal={goal}
+          decompose={{
+            busy: busy && decomposingId === goal.id,
+            doneStepCount: decomposed?.goalId === goal.id ? decomposed.stepCount : null,
+            onRun: () => decompose(goal.id),
+          }}
+        />
       ))}
+
+      {error && (
+        <div className="mt-4">
+          <InlineError message={error} onDismiss={clearError} />
+        </div>
+      )}
 
       {/* ================= 地平线：至高科技树 ================= */}
       <TechTreeBlock />
@@ -134,7 +181,15 @@ function ClearRow({ component }: { component: ClearComponentView }) {
 // 一张终极目标卡
 // ---------------------------------------------------------------------------
 
-function GoalCard({ goal }: { goal: GoalView }) {
+/** 一张目标卡上的「拆解」控制器（面板持有状态，卡片只渲染） */
+interface GoalDecompose {
+  busy: boolean;
+  /** 拆完之后：这一拆拟了几步（null = 还没拆过） */
+  doneStepCount: number | null;
+  onRun: () => void;
+}
+
+function GoalCard({ goal, decompose }: { goal: GoalView; decompose: GoalDecompose }) {
   const pct = Math.round(goal.progress * 100);
 
   return (
@@ -179,6 +234,29 @@ function GoalCard({ goal }: { goal: GoalView }) {
           <MilestoneRow key={m.id} milestone={m} />
         ))}
       </ul>
+
+      {/* 拆解入口。只给没达成的目标 —— 已经亮了的格子没有"下一步"可拆 */}
+      {!goal.achieved && (
+        <div className="mt-2.5 border-t border-white/[0.07] pt-2.5">
+          {decompose.doneStepCount !== null ? (
+            <p className="text-[10.5px] leading-relaxed text-white/40">
+              调度员拟了 {decompose.doneStepCount} 步，在「悬赏 · 待议」里等你过目。
+            </p>
+          ) : (
+            <button
+              type="button"
+              disabled={decompose.busy}
+              onClick={decompose.onRun}
+              className={cn(
+                'glass-pill glass-hover px-2.5 py-1.5 text-[11px] text-white/55',
+                decompose.busy && 'cursor-not-allowed opacity-60',
+              )}
+            >
+              {decompose.busy ? '调度员正在拆…' : '拆解成任务链'}
+            </button>
+          )}
+        </div>
+      )}
     </article>
   );
 }

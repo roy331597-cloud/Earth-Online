@@ -7,8 +7,14 @@ import { classLabelOf } from '@/data/catalog/classes';
 import { cn } from '@/lib/cn';
 import { formatUsd } from '@/lib/format';
 import { previewRoute } from '@/lib/mockForge';
+import { composeCommissionBrief } from '@/lib/questBriefs';
 import type { PanelKey } from '@/lib/panels';
-import { REROUTE_CHAIN_LIMIT, REROUTE_REQUEST_MAX_LEN } from '@/data/catalog/policy';
+import {
+  QUEST_REWARD_TIERS,
+  REROUTE_CHAIN_LIMIT,
+  REROUTE_REQUEST_MAX_LEN,
+} from '@/data/catalog/policy';
+import type { QuestRewardTierKey } from '@/data/catalog/policy';
 import { draftQuests, inHandQuests, questsByStatus } from '@/lib/selectors';
 import { useAgentAction } from '@/hooks/useAgentAction';
 import { InlineError } from '@/components/ui/InlineError';
@@ -16,13 +22,14 @@ import { thunks } from '@/store/agentRuntime';
 import {
   chainsAwaitingRegeneration,
   claimQuest,
+  createManualQuest,
   openTurnIn,
   reviewQuestDraft,
   startQuest,
   type RegenerationCandidate,
 } from '@/store/operations';
 import { useMutate, useSave } from '@/store/useEarthOnlineStore';
-import type { Quest } from '@/types';
+import type { ClassIdLiteral, Quest } from '@/types';
 
 type BountyTab = 'board' | 'active' | 'review' | 'spark';
 
@@ -59,6 +66,15 @@ interface BountyPanelProps {
  * 批量点「通过」。分开之后，"裁决"重新变得是个决定。
  *
  * 铸造完仍然直接切回「待议」—— 让玩家立刻面对自己刚生成的东西。
+ *
+ * ---------------------------------------------------------------------------
+ * 板子上的两条"来源"
+ * ---------------------------------------------------------------------------
+ * 板空着的时候，玩家不该只剩「自己编一个想法」这一条路。所以悬赏板常驻
+ * 两个来源：「让调度员出题」——系统按你此刻的处境（最近的终极目标 +
+ * 聚焦篇章）出一串，产出照旧落「待议」；以及一支手写笔 —— 写下的直接进
+ * 「进行中」（审核闸门防的是"系统替玩家做决定"，防不住也不该防
+ * "玩家自己做的决定"，见 createManualQuest）。
  */
 export function BountyPanel({ panel, onClose }: BountyPanelProps) {
   const save = useSave();
@@ -131,40 +147,246 @@ function BoardTab({
   onGoToReview: () => void;
   onGoToActive: () => void;
 }) {
-  if (offered.length === 0) {
-    // 三个去处各自有条路：待议 > 进行中 > 写想法，按"离你最近的一步"排
-    if (draftCount > 0) {
-      return (
-        <EmptyNote
-          text="板上没有能接的 —— 但待议栏里还有东西等你过目。"
-          action={{ label: `去待议（${draftCount}）`, onClick: onGoToReview }}
-        />
-      );
-    }
-    if (inHandCount > 0) {
-      return (
-        <EmptyNote
-          text={`板上暂时没有新的 —— 你手上还有 ${inHandCount} 件在推进。做完它们，板子自己会更新。`}
-          action={{ label: '去看进行中', onClick: onGoToActive }}
-        />
-      );
-    }
-    return (
-      <EmptyNote
-        text="板上是空的。别人给的题做完了，剩下的就得自己想了。"
-        action={{ label: '写下一个想法', onClick: onGoToSpark }}
-      />
-    );
-  }
+  const save = useSave();
+  const [writing, setWriting] = useState(false);
+  const [justWrote, setJustWrote] = useState(false);
+  const { busy, error, run, clearError } = useAgentAction();
+
+  // 素材取不到（五个目标全达成了）时按钮就该是灰的 —— 不拿一句假的处境去出题
+  const canCommission = composeCommissionBrief(save) !== null;
+
+  const commission = () => {
+    const brief = composeCommissionBrief(save);
+    if (brief === null || busy) return;
+    setJustWrote(false);
+    void run(async () => {
+      const result = await thunks.forgeChain({
+        idea: brief,
+        classId: null,
+        deepDeliberation: false,
+        from: 'commission',
+      });
+      // 与灵感框同款：只有真的拿到链才切过去 —— 失败时留在原地看那行字
+      if (result.ok) onGoToReview();
+      return result;
+    });
+  };
 
   return (
-    <div className="space-y-4 pt-3.5">
-      <Group title="可接" hint="前置没完成的，接了也开不了工">
-        {offered.map((q) => (
-          <OfferCard key={q.id} quest={q} />
-        ))}
-      </Group>
+    <div className="space-y-3 pt-3.5">
+      {/* 板子的两个常驻来源：系统按处境出题 / 自己写一条 */}
+      <div className="flex flex-wrap gap-1.5">
+        <button
+          type="button"
+          disabled={!canCommission || busy}
+          onClick={commission}
+          className={cn(
+            'rounded-lg border px-3 py-2 text-[11.5px] transition-all duration-300 ease-cinematic',
+            canCommission && !busy
+              ? 'border-abyss-400/45 bg-abyss-500/[0.12] text-abyss-300 hover:scale-[1.03] hover:bg-abyss-500/[0.22]'
+              : 'cursor-not-allowed border-white/10 bg-white/[0.04] text-white/30',
+          )}
+        >
+          {busy ? '调度员正在看你的近况…' : '让调度员出题'}
+        </button>
+        <button
+          type="button"
+          aria-expanded={writing}
+          onClick={() => {
+            setWriting((v) => !v);
+            setJustWrote(false);
+          }}
+          className={cn(
+            'glass-pill glass-hover px-3 py-2 text-[11.5px]',
+            writing ? 'text-amber-200' : 'text-white/70',
+          )}
+        >
+          ＋ 自己写一条
+        </button>
+      </div>
+      <p className="text-[10.5px] leading-relaxed text-white/30">
+        调度员出的题落在「待议」等你过目；自己写的那条直接进「进行中」。
+      </p>
+
+      {error && <InlineError message={error} onDismiss={clearError} />}
+
+      {writing && (
+        <ManualQuestForm
+          onDone={(wrote) => {
+            setWriting(false);
+            if (wrote) setJustWrote(true);
+          }}
+        />
+      )}
+
+      {justWrote && (
+        <div className="flex items-center gap-2.5 rounded-xl border border-amber-400/20 bg-amber-400/[0.05] px-3 py-2.5">
+          <p className="min-w-0 flex-1 text-[11.5px] leading-relaxed text-white/60">
+            写好了 —— 它已经在「进行中」里，从现在起算数。
+          </p>
+          <button
+            type="button"
+            onClick={onGoToActive}
+            className="glass-pill glass-hover shrink-0 px-2.5 py-1.5 text-[11px] text-white/70"
+          >
+            去看进行中
+          </button>
+        </div>
+      )}
+
+      {offered.length === 0 ? (
+        // 三个去处各自有条路：待议 > 进行中 > 写想法，按"离你最近的一步"排
+        draftCount > 0 ? (
+          <EmptyNote
+            text="板上没有能接的 —— 但待议栏里还有东西等你过目。"
+            action={{ label: `去待议（${draftCount}）`, onClick: onGoToReview }}
+          />
+        ) : inHandCount > 0 ? (
+          <EmptyNote
+            text={`板上暂时没有新的 —— 你手上还有 ${inHandCount} 件在推进。做完它们，板子自己会更新。`}
+            action={{ label: '去看进行中', onClick: onGoToActive }}
+          />
+        ) : (
+          <EmptyNote
+            text="板上是空的。上面两条路都能让板子重新长出东西来 —— 或者，写下一个想法让它拆成一条链。"
+            action={{ label: '写下一个想法', onClick: onGoToSpark }}
+          />
+        )
+      ) : (
+        <Group title="可接" hint="前置没完成的，接了也开不了工">
+          {offered.map((q) => (
+            <OfferCard key={q.id} quest={q} />
+          ))}
+        </Group>
+      )}
     </div>
+  );
+}
+
+/**
+ * 自己写一条任务。
+ *
+ * 三档是**预置刻度**而不是自由输入：让"这件事有多重"先成为一个要想清楚的
+ * 选择（轻 / 中 / 重，各自的定位写在提示里），而不是一个可以随手写大的数字。
+ *
+ * 写完**直接进「进行中」** —— 它不经过「待议」，因为审核闸门防的是
+ * "系统替玩家做决定"，而这一条是玩家自己做的决定（见 operations.createManualQuest）。
+ */
+function ManualQuestForm({ onDone }: { onDone: (wrote: boolean) => void }) {
+  const save = useSave();
+  const mutate = useMutate();
+  const [title, setTitle] = useState('');
+  const [classId, setClassId] = useState<ClassIdLiteral | null>(null);
+  const [tier, setTier] = useState<QuestRewardTierKey>('medium');
+
+  const ready = title.trim().length > 0;
+  const selectedTier = QUEST_REWARD_TIERS.find((t) => t.key === tier) ?? QUEST_REWARD_TIERS[1];
+
+  const submit = () => {
+    if (!ready) return;
+    mutate((s) =>
+      createManualQuest(
+        s,
+        { title: title.trim(), classId, rewardExp: selectedTier.exp, difficulty: selectedTier.difficulty },
+        new Date(),
+      ),
+    );
+    onDone(true);
+  };
+
+  return (
+    <div className="rounded-xl border border-amber-400/25 bg-amber-400/[0.05] p-3.5">
+      <input
+        type="text"
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        maxLength={40}
+        placeholder="想做的事，直接写下来…"
+        aria-label="自己写一条任务"
+        className="w-full rounded-lg border border-white/[0.12] bg-ink-950/45 px-3 py-2.5 text-[12.5px] text-white placeholder:text-white/30 focus:border-amber-400/40 focus:outline-none focus:ring-1 focus:ring-amber-400/30"
+      />
+
+      {/* 归属职业线。通用永远排第一 —— "不给它挂任何线"必须是默认选项 */}
+      <div className="mt-2.5 flex flex-wrap gap-1.5">
+        <Chip active={classId === null} onClick={() => setClassId(null)}>
+          通用
+        </Chip>
+        {save.careers.tracks.map((t) => (
+          <Chip key={t.classId} active={classId === t.classId} onClick={() => setClassId(t.classId)}>
+            {classLabelOf(t.classId)}
+          </Chip>
+        ))}
+      </div>
+
+      {/* 三档重量。难度随档位定格 —— 卡片上的星级与工时都由它说了算 */}
+      <div className="mt-2.5 grid grid-cols-3 gap-1.5">
+        {QUEST_REWARD_TIERS.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            aria-pressed={tier === t.key}
+            onClick={() => setTier(t.key)}
+            className={cn(
+              'rounded-lg border px-2 py-2 text-center transition-all duration-300 ease-cinematic',
+              tier === t.key
+                ? 'border-amber-400/50 bg-amber-400/[0.12]'
+                : 'border-white/[0.12] bg-white/[0.03] hover:border-white/25',
+            )}
+          >
+            <div className={cn('text-[12px]', tier === t.key ? 'text-amber-200' : 'text-white/70')}>
+              {t.label} <span className="text-[10px] text-amber-400/70">{'★'.repeat(t.difficulty)}</span>
+            </div>
+            <div className="numeric mt-0.5 text-[10.5px] text-white/40">{t.exp} EXP</div>
+          </button>
+        ))}
+      </div>
+      <p className="mt-1.5 text-[10.5px] leading-relaxed text-white/35">{selectedTier.hint}</p>
+
+      <div className="mt-3 flex gap-2">
+        <button
+          type="button"
+          onClick={() => onDone(false)}
+          className="glass-pill glass-hover flex-1 py-2 text-[12px] text-white/60"
+        >
+          算了
+        </button>
+        <button
+          type="button"
+          disabled={!ready}
+          onClick={submit}
+          className={cn(
+            'flex-[1.4] rounded-lg border py-2 text-[12px] transition-all duration-300 ease-cinematic',
+            ready
+              ? 'border-amber-400/50 bg-amber-400/15 font-medium text-amber-200 hover:scale-[1.02] hover:bg-amber-400/25'
+              : 'cursor-not-allowed border-white/10 bg-white/[0.04] text-white/30',
+          )}
+        >
+          写下来
+        </button>
+      </div>
+
+      <p className="mt-2.5 text-[10.5px] leading-relaxed text-white/30">
+        写下来就直接进「进行中」—— 它不需要谁批准，因为它出自你自己的手。
+      </p>
+    </div>
+  );
+}
+
+function Chip({ active, onClick, children }: { active: boolean; onClick: () => void; children: string }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={cn(
+        'rounded-md border px-2 py-1 text-[11px] transition-all duration-300 ease-cinematic',
+        active
+          ? 'border-abyss-400/60 bg-abyss-500/20 text-abyss-300'
+          : 'border-white/[0.12] bg-white/[0.03] text-white/50 hover:border-white/25',
+      )}
+    >
+      {children}
+    </button>
   );
 }
 
