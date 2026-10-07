@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no"
+    />
+    <meta name="theme-color" content="#0a0a0c" />
+    <meta name="description" content="《地球OL / Earth Online》· 一块属于你自己的城市。" />
+    <title>地球OL · Earth Online</title>
+
+    <!--
+      PWA：装到手机主屏幕后按原生应用的样子开（清单在 public/manifest.webmanifest）。
+      display: standalone 由清单声明；iOS 不读清单里的这几项 ——
+      隐藏 Safari 地址栏与底栏，全靠下面这组 apple-*。
+    -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <!--
+      black-translucent：状态栏透明、内容铺到屏幕最上沿（灵动岛/刘海两侧的
+      安全距离由各组件用 env(safe-area-inset-*) 自己让出 —— 见 index.css 的
+      .safe-top / .safe-bottom；上面 viewport 里的 viewport-fit=cover 是它的前提）。
+    -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="地球OL" />
+
+    <!--
+      首屏背景预连接：避免背景图在手机端出现白屏闪一下。
+      背景图本身由 src/lib/sceneAssets.ts 提供（Phase 2 为 Unsplash 占位）。
+    -->
+    <link rel="preconnect" href="https://images.unsplash.com" crossorigin />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

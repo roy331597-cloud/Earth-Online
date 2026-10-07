@@ -1,0 +1,18 @@
+# 地球OL · 生产编排（单服务：镜像内的 nginx 服务构建产物）
+#
+#   docker compose up -d --build     启动 / 升级
+#   docker compose logs -f           看日志
+#   docker compose down              停机
+#
+# 对外端口：宿主机 8080 → 容器 80。前面建议架一层 HTTPS 反代（个人域名 +
+# 证书）再对手机开放 —— PWA 安装要求安全上下文，纯 http 装不上。
+# 见 docs/DEPLOY.md。
+services:
+  earthonline:
+    build: .
+    image: earthonline:latest
+    container_name: earthonline
+    ports:
+      - "8080:80"
+    # 服务器重启、崩溃、Docker 升级之后自己回来；只有手动 down 才真的停
+    restart: unless-stopped

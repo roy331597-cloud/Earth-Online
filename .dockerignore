@@ -1,0 +1,13 @@
+# 不进构建上下文的东西。
+# node_modules 是这里最重要的一个：宿主机的依赖（Windows 构建的、平台绑定的）
+# 如果进了镜像，会盖掉 npm ci 装好的那一份 —— 经典"本机构建成功，镜像里炸"。
+node_modules
+dist
+.backup
+.tmp
+.git
+docs
+*.log
+Dockerfile
+docker-compose.yml
+.dockerignore

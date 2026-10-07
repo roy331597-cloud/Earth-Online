@@ -1,0 +1,182 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==========================================================================
+   EarthOnline · 全局样式
+   视觉基调：Black / White / Gold / Blue，暗色毛玻璃，现代都市 AVG。
+   约定：所有可复用的玻璃质感都收进 @layer components，
+        组件里不重复写一串 bg-black/40 backdrop-blur-md border-white/10。
+   ========================================================================== */
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-ink-950 text-white antialiased;
+    /* 沉浸式全屏：禁止页面的橡皮筋滚动，避免手机端拖动时"穿帮" */
+    overscroll-behavior: none;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* 移动端：去掉点击时的蓝色高亮方块（AVG 界面里非常破坏沉浸感） */
+  * {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* 键盘可达性：只在键盘导航时显示焦点环，鼠标点击不显示 */
+  :focus-visible {
+    @apply outline-none ring-2 ring-amber-400/70 ring-offset-2 ring-offset-black/60;
+  }
+
+  ::selection {
+    @apply bg-amber-400/30;
+  }
+}
+
+@layer components {
+  /* --------------------------------------------------------------------
+     1. 场景底座
+     -------------------------------------------------------------------- */
+
+  /**
+   * 全屏壳。用 dvh 而非 vh：手机浏览器地址栏收起/展开时，100vh 会跳一下。
+   * 先写 vh 作降级，再写 dvh 覆盖（不支持的浏览器忽略第二行）。
+   */
+  .app-shell {
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  /* --------------------------------------------------------------------
+     2. 毛玻璃三件套
+
+     底色用 `ink-800`（#111726，近黑带蓝）而不是纯黑或 Tailwind 的 slate/zinc：
+     纯黑会把画面压成一块墓碑，而 slate/zinc 自带一套灰调，
+     混进来就破坏了「黑 / 白 / 金 / 蓝」这条唯一的调色纪律。
+     ink-800 本身就是冷青灰，透明度调低之后，
+     金色与蓝色标签是**从冷灰底子浮出来**的，而不是从一片死黑里抠出来的。
+     -------------------------------------------------------------------- */
+
+  /** 基础玻璃：卡片、面板 */
+  .glass {
+    @apply rounded-xl border border-white/15 bg-ink-800/45 text-white shadow-glass backdrop-blur-md;
+  }
+
+  /** 加深玻璃：需要承载较多文字/数字的层（HUD、抽屉、侧栏） */
+  .glass-deep {
+    @apply rounded-2xl border border-white/15 bg-ink-800/60 text-white shadow-glass backdrop-blur-xl;
+  }
+
+  /** 胶囊玻璃：按钮与标签（边框 20% 白是需求点名的规格，保留） */
+  .glass-pill {
+    @apply rounded-lg border border-white/20 bg-ink-800/55 text-white backdrop-blur-md;
+  }
+
+  /**
+   * 统一的悬浮反馈：轻微放大 + 金色边框高亮 + 金色微光。
+   * 金色呼吸微光由 shadow-glow-gold 提供；动画本身只做透明度呼吸，
+   * 避免整个按钮缩放抖动（那会让人晕）。
+   */
+  .glass-hover {
+    @apply transition-all duration-300 ease-cinematic
+           hover:scale-[1.03] hover:border-amber-400/50 hover:shadow-glow-gold
+           active:scale-[0.99];
+  }
+
+  /** 当前选中态：常亮金边 + 极淡金色底 */
+  .glass-active {
+    @apply border-amber-400/50 bg-amber-400/10 text-amber-300 shadow-glow-gold;
+  }
+
+  /* --------------------------------------------------------------------
+     3. 文本与数值
+     -------------------------------------------------------------------- */
+
+  /** 金额/等级/时间等会跳动变化的数字：等宽数字，避免逐位抖动 */
+  .numeric {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum';
+  }
+
+  /** 金色数值（A9 金库） */
+  .numeric-gold {
+    @apply numeric text-amber-400;
+  }
+
+  /** 文学性文本：题记、篇章名、日记正文 */
+  .prose-cinematic {
+    @apply font-serif leading-relaxed tracking-wide;
+  }
+
+  /* --------------------------------------------------------------------
+     4. 手机安全区
+     -------------------------------------------------------------------- */
+
+  .safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  .safe-top {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  /* --------------------------------------------------------------------
+     5. 工具
+     -------------------------------------------------------------------- */
+
+  .no-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /**
+   * 暗角 + 上下压暗。
+   *
+   * 本次调亮的关键改动：**中央区域完全不加权**（径向从 58% 才开始起暗），
+   * 只在四周边缘留一层柔和的收边。上一版的中央已经有 30% 起暗，
+   * 叠上整体压暗层之后，画面中央灰得像阴天。
+   *
+   * 上下两条渐变仍在（顶 0.5 / 底 0.78），但减弱并收短了：
+   * 它们存在的理由是**文字可读性**（左上篇章铭牌、右上 HUD、底部 Dock），
+   * 不是为了把画面变暗。面板自己还有一层玻璃底，两者相加足够。
+   */
+  .vignette {
+    background:
+      linear-gradient(to bottom, rgba(5, 7, 12, 0.5) 0%, rgba(5, 7, 12, 0) 20%),
+      linear-gradient(to top, rgba(5, 7, 12, 0.78) 0%, rgba(5, 7, 12, 0) 32%),
+      radial-gradient(ellipse at center, rgba(5, 7, 12, 0) 58%, rgba(5, 7, 12, 0.46) 100%);
+  }
+}
+
+@layer utilities {
+  /* 尊重系统的"减少动态效果"设置：关闭背景推近与呼吸光 */
+  @media (prefers-reduced-motion: reduce) {
+    .animate-kenburns,
+    .animate-breathe,
+    .animate-dot-pulse,
+    .animate-pop-in,
+    .animate-float-up,
+    .animate-gold-drift {
+      animation: none !important;
+    }
+
+    /* 微粒关掉动画后会僵在半空 —— 直接藏起来。静止的尘埃不是氛围，是脏点 */
+    .gold-mote {
+      display: none !important;
+    }
+  }
+}
