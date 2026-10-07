@@ -1,18 +1,45 @@
-# 地球OL · 生产编排（单服务：镜像内的 nginx 服务构建产物）
+# 地球OL · 生产编排（两个服务：应用 + Caddy —— 一条命令起整个栈）
 #
-#   docker compose up -d --build     启动 / 升级
+#   docker compose up -d --build     启动 / 升级（首次构建几分钟）
 #   docker compose logs -f           看日志
 #   docker compose down              停机
 #
-# 对外端口：宿主机 8080 → 容器 80。前面建议架一层 HTTPS 反代（个人域名 +
-# 证书）再对手机开放 —— PWA 安装要求安全上下文，纯 http 装不上。
+# 对外只有 Caddy 一个面：80 / 443。应用容器不对宿主机开端口，
+# 只有 Caddy 能到它（compose 内网 earthonline:80）。
+#
+# HTTPS 的开关是 .env 里的一行：
+#   SITE_ADDRESS=earth.example.com   → Caddy 自动申请并续期证书
+#   不填 → 默认 ":80"，纯 HTTP，先用 IP 验证
 # 见 docs/DEPLOY.md。
 services:
   earthonline:
     build: .
     image: earthonline:latest
     container_name: earthonline
-    ports:
-      - "8080:80"
     # 服务器重启、崩溃、Docker 升级之后自己回来；只有手动 down 才真的停
     restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    container_name: earthonline-caddy
+    restart: unless-stopped
+    # 对外就这两个端口：80（HTTP 与 ACME 挑战）、443（HTTPS）
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # 默认 ":80" = 纯 HTTP 跑在所有主机名上（还没有域名时的形态）
+      - "SITE_ADDRESS=${SITE_ADDRESS:-:80}"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # 证书与 ACME 账户数据：升级 / 重建容器都不丢，不重签
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      earthonline:
+        # 等应用体检通过再起 —— 首启不撞空上游，compose ps 里的 healthy 是真话
+        condition: service_healthy
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -19,7 +19,7 @@
 //   ㉘ 成就引擎（命名、补发、只增不减、雾里不点名）
 //   ㉙ 进化树引擎（点亮、回填、掀雾、统计）
 //   ㉚ 终局目标引擎（点亮、重算、圣殿视图）
-//   ㉛ 出厂封装（PWA 清单 / iOS meta / Docker / nginx / compose / README / 裸机配置）
+//   ㉛ 出厂封装（PWA 清单 / iOS meta / Docker / nginx / compose + Caddy / README / 裸机配置）
 //   ㉜ 出厂清场（空档：结构完整 / 引用隔离 / 全空清单 / 漏斗空转两遍）
 //
 // ①–⑨ 验的是**写**（状态怎么流转）；⑩–⑬ 验的是**读**（selector 从状态里读出什么）。
@@ -109,10 +109,13 @@
 //    顺手添一条 Permissions-Policy: geolocation=()，世界页的定位就静默失效。
 //    它们全都要等"真的装到手机主屏幕上"才暴露 —— 所以在离开这台机器之前先钉住。
 //
-//    发布之后又补了两件：README（仓库的门面 —— 说清这是什么、怎么跑、怎么部署）
-//    与「没有 Docker」的裸机配置 deploy/nginx-bare.conf。后者与容器版 nginx.conf
-//    是同一套策略的两个落点，所以这一节还钉了一条**防漂移**：两份配置的安全头
-//    与缓存三档必须逐条同款 —— 只改一份，闸门会响。
+//    发布之后又长出来几件：README（仓库的门面 —— 说清这是什么、怎么跑、怎么
+//    部署）；「一条命令栈」—— compose 里多了 Caddy 半个服务，域名走 .env，
+//    证书自动签，宿主机上只剩 Caddy 一个入口（⑦ 因此盯得更紧：对外端口、卷、
+//    等待条件都是"少了不会崩、只会让人在两小时后疑惑"的东西）；以及「没有
+//    Docker」的备选 deploy/nginx-bare.conf —— 它与容器版 nginx.conf 是同一套
+//    策略的两个落点，所以这一节还钉了一条**防漂移**：两份配置的安全头与缓存
+//    三档必须逐条同款 —— 只改一份，闸门会响。
 //
 // ㉜ 是出厂清场：PO 裁定"开发期为验收造的那批测试内容全部清空"。
 //    清的姿势是分家 —— mockState 继续当夹具（本脚本近千条断言长在上面），
@@ -3876,11 +3879,25 @@ try {
   truthy('指纹资源长缓存（/assets/ 一年）',
     /location \/assets\/[\s\S]{0,80}expires 1y;/.test(nginx));
 
-  // —— ⑦ compose 与构建上下文 ——
+  // —— ⑦ compose 与构建上下文（一条命令栈：应用 + Caddy） ——
   const compose = readText('docker-compose.yml');
-  truthy('端口 8080 → 80', compose.includes('"8080:80"'));
-  truthy('restart: unless-stopped（服务器重启后自己回来）',
-    compose.includes('restart: unless-stopped'));
+  const caddyfile = readText('deploy/Caddyfile');
+  truthy('一条命令起整个栈：应用 + Caddy 两个服务',
+    /^\s{2}earthonline:/m.test(compose) && /^\s{2}caddy:/m.test(compose));
+  truthy('Caddy 是唯一对外的面：80 与 443',
+    compose.includes('"80:80"') && compose.includes('"443:443"'));
+  truthy('应用端口不再捅到宿主机（对外只有一个入口，少一条解释不清的路径）',
+    !compose.includes('8080:80'));
+  truthy('证书数据留卷（升级 / 重建不重签）', compose.includes('caddy_data'));
+  truthy('站点地址走环境变量：默认 ":80" 先用 IP，填域名自动 HTTPS',
+    compose.includes('SITE_ADDRESS') && compose.includes(':-:80'));
+  truthy('Caddyfile 挂进容器，反代目标是内网服务名',
+    compose.includes('./deploy/Caddyfile:/etc/caddy/Caddyfile') &&
+      caddyfile.includes('reverse_proxy earthonline:80'));
+  truthy('restart: unless-stopped 两个服务都在（服务器重启后自己回来）',
+    (compose.match(/restart: unless-stopped/g) ?? []).length >= 2);
+  truthy('caddy 等应用体检通过再起（首启不撞空上游）',
+    compose.includes('condition: service_healthy'));
   truthy('node_modules 不进构建上下文（宿主机依赖盖掉 npm ci = 经典翻车）',
     readText('.dockerignore').split('\n').map((l) => l.trim()).includes('node_modules'));
 
@@ -3890,6 +3907,8 @@ try {
   truthy('部署文档：手机安装步骤（添加到主屏幕）', deploy.includes('添加到主屏幕'));
   truthy('部署文档：HTTPS 是硬前提（PWA 装不上，九成先查这一条）',
     deploy.includes('HTTPS'));
+  truthy('部署文档：填域名只差一行（SITE_ADDRESS 写进 .env）',
+    deploy.includes('SITE_ADDRESS') && deploy.includes('.env'));
 
   // —— ⑨ README 与「没有 Docker」的裸机路径（PO 的服务器没有 Docker） ——
   const readme = readText('README.md');

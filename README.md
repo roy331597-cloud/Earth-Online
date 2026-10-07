@@ -20,11 +20,10 @@ npm run verify:ops  # 不变量断言全集（改引擎 / 内容目录后必跑�
 
 ## 部署
 
-一页式说明见 [docs/DEPLOY.md](docs/DEPLOY.md)，两条路任选：
-
-- **不用 Docker（推荐）**：服务器装 Node + nginx，就地构建托管 —— 仓库里带了
-  现成的站点配置 [`deploy/nginx-bare.conf`](deploy/nginx-bare.conf)。
-- **Docker**：`docker compose up -d --build`，镜像里是 nginx 服务同一包构建产物。
+一页式说明见 [docs/DEPLOY.md](docs/DEPLOY.md)。推荐做法是**一条命令起整个栈**：
+`docker compose up -d --build` 同时拉起应用与 Caddy，域名填进 `.env` 就自动 HTTPS。
+服务器上装不了 Docker 时可用备选路径（Node + nginx，配置见
+[`deploy/nginx-bare.conf`](deploy/nginx-bare.conf)）。
 
 带 HTTPS 的域名是"装进手机"的硬前提 —— iOS 与 Android 都把安装限定在安全上下文里。
 

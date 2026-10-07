@@ -2,9 +2,9 @@
 # 地球OL · 生产镜像（多阶段：Node 构建 → nginx 运行）
 #
 #   docker build -t earthonline .
-#   docker run -d -p 8080:80 --restart unless-stopped earthonline
+#   docker run -d -p 8080:80 --restart unless-stopped earthonline   # 单跑应用，临时检查用
 #
-# 或用仓库根目录的 docker-compose.yml（推荐）：
+# 正常部署走仓库根目录的 docker-compose.yml（一条命令起整个栈：应用 + Caddy）：
 #   docker compose up -d --build
 #
 # 运行层是 nginx:alpine：没有 Node、没有 node_modules、没有源码 ——
