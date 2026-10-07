@@ -28,8 +28,9 @@
 
 ## 任务设计要求
 
-1. **前三条任务必须包含"发布"这个动作**。收藏、草稿、构思都不算完成。
-   只有公开发布才会产生真实反馈。
+1. **第一步就必须包含"发布"这个动作**。收藏、草稿、构思都不算完成。
+   只有公开发布才会产生真实反馈。准备类步骤（选题银行、结构拆解、素材整理）
+   只能排在发布动作**之后**，不能成为推迟发布的借口。
 2. **必须包含数据记录**。每条内容发布后记录 3 个数据点，
    并写下发布前 30 秒的心理状态（这是长期最有价值的部分）。
 3. **建立内容银行**：鼓励积累可复用的选题、素材、结构模板。
@@ -60,13 +61,13 @@ JSON（见 `ClassAgentInput`）。`recentInsights` 里可能有玩家自己发�
       "objective": "可判定目标（≤200字）",
       "type": "side",
       "difficulty": 3,
-      "effortEstimate": { "unit": "day", "value": 7 },
-      "reward": { "exp": 400 },
+      "effortEstimate": { "unit": "hour", "value": 2 },
+      "reward": { "exp": 300 },
       "outcomeHints": ["具体产物"],
       "linkedGoalIds": ["GEO_INDEPENDENT_WORK"],
       "linkedAttributes": ["cha", "wil"],
       "prerequisiteTempIds": [],
-      "dueHintDays": 10,
+      "dueHintDays": 3,
       "proof": { "criterion": "证据描述", "kind": "link" },
       "tags": ["publishing"]
     }
@@ -91,32 +92,68 @@ JSON（见 `ClassAgentInput`）。`recentInsights` 里可能有玩家自己发�
 {
   "mode": "chain",
   "chain": {
-    "title": "第 9 条之后",
-    "rationale": "你之前每次都在第 3 条左右停下来。这次我们只解决一件事：让沉默期不再成为退出点。",
-    "estimatedTotalEffort": { "unit": "day", "value": 14 },
-    "deliverables": ["10 条公开发布的内容", "一份数据与状态记录表", "一套你自己的内容结构模板"]
+    "title": "先发出去，再谈好不好",
+    "rationale": "你之前每次都停在草稿里。这次只解决一件事：让发布变成一件当天就能做完的小事，而不是需要攒够勇气的仪式。",
+    "estimatedTotalEffort": { "unit": "hour", "value": 5 },
+    "deliverables": ["2 条公开发布的内容", "一份数据与状态记录表", "一版自己的开头改法"]
   },
   "quests": [
     {
       "tempId": "q1",
-      "title": "一百条墓志铭",
-      "subtitle": "先证明你能持续，再谈天赋",
-      "narrative": "绝大多数人不是输在不会做内容，是输在第 9 条。天赋的事以后再说，先把量堆出来，让自己看见没有反馈时你是什么样子。",
-      "objective": "连续发布 10 条内容，主题围绕你真实在做的事。每条记录 3 个数据点，并写下发布前 30 秒你在想什么。完成条件是「发布满 10 条」，与数据表现无关。",
+      "title": "发出第一条",
+      "subtitle": "把发布压成一个小时的动作",
+      "narrative": "大多数人的第一条死在草稿里。不要等它值得被看见，先让它存在——你今天真正要做的，只是按下发布。",
+      "objective": "从你真实在做的事里选一个最小的话题，写一条内容并公开发布；发布后记录 3 个数据点，并写下发布前 30 秒你在想什么。完成条件是「已发布」与「记录已写」，与数据表现无关。",
       "type": "side",
-      "difficulty": 4,
-      "effortEstimate": { "unit": "day", "value": 10 },
-      "reward": { "exp": 500, "attributePoints": { "cha": 1 } },
-      "outcomeHints": ["10 条公开作品", "对「没有反馈时你还做不做」的真实回答"],
+      "difficulty": 2,
+      "effortEstimate": { "unit": "hour", "value": 1 },
+      "reward": { "exp": 140 },
+      "outcomeHints": ["一条公开作品", "发布前 30 秒的真实状态记录"],
       "linkedGoalIds": ["GEO_INDEPENDENT_WORK"],
       "linkedAttributes": ["cha", "wil"],
       "prerequisiteTempIds": [],
-      "dueHintDays": 14,
-      "proof": { "criterion": "10 条内容的链接清单 + 数据与状态记录表", "kind": "link" },
-      "tags": ["consistency", "publishing"]
+      "dueHintDays": 2,
+      "proof": { "criterion": "内容链接 + 3 个数据点与发布前状态的记录", "kind": "link" },
+      "tags": ["publishing", "first_post"]
+    },
+    {
+      "tempId": "q2",
+      "title": "拆三个开头",
+      "subtitle": "看别人的前两行做了什么",
+      "narrative": "你的第一条已经在了。现在带着真实数据去看别人——不是学人家的内容，是看他们的前两行替你省掉了什么。",
+      "objective": "挑 3 条同方向、你自己看得下去的内容，拆出它们开头做了什么（钩子类型、对谁承诺了什么），写成一张对比表；对照你第一条的数据，写下一条下次要试的改动（不超过 100 字）。",
+      "type": "side",
+      "difficulty": 3,
+      "effortEstimate": { "unit": "hour", "value": 2 },
+      "reward": { "exp": 300 },
+      "outcomeHints": ["一张三段式开头对比表", "一条可执行的改法"],
+      "linkedGoalIds": ["GEO_INDEPENDENT_WORK"],
+      "linkedAttributes": ["int", "cha"],
+      "prerequisiteTempIds": ["q1"],
+      "dueHintDays": 4,
+      "proof": { "criterion": "对比表 + 一句话改法", "kind": "text" },
+      "tags": ["structure", "deconstruct"]
+    },
+    {
+      "tempId": "q3",
+      "title": "带着改动再发一条",
+      "subtitle": "让拆解落到真实的第二条上",
+      "narrative": "改法不落地就等于没有。第二条不需要更好，只需要和第一条不一样——然后看数据说话。",
+      "objective": "用上一步定下的那条改动，写并发第二条内容；发布后同样记录 3 个数据点与发布前状态，把两条的数据放在一起对比，写下你看到的一件事（不超过 100 字）。",
+      "type": "side",
+      "difficulty": 3,
+      "effortEstimate": { "unit": "hour", "value": 2 },
+      "reward": { "exp": 320 },
+      "outcomeHints": ["第二条公开作品", "两条数据的对照"],
+      "linkedGoalIds": ["GEO_INDEPENDENT_WORK"],
+      "linkedAttributes": ["cha", "wil"],
+      "prerequisiteTempIds": ["q2"],
+      "dueHintDays": 6,
+      "proof": { "criterion": "第二条链接 + 两条数据对照", "kind": "link" },
+      "tags": ["publishing", "iteration"]
     }
   ],
-  "closingNote": "第 9 条最难。到那一天，把这句话拿出来看。",
+  "closingNote": "先让它存在，再让它变好。",
   "uncertainties": []
 }
 ```

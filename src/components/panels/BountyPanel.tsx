@@ -15,21 +15,23 @@ import {
   REROUTE_REQUEST_MAX_LEN,
 } from '@/data/catalog/policy';
 import type { QuestRewardTierKey } from '@/data/catalog/policy';
-import { draftQuests, inHandQuests, questsByStatus } from '@/lib/selectors';
+import { chainsAwaitingReview, claimableQuests, inHandQuests, questsByStatus } from '@/lib/selectors';
 import { useAgentAction } from '@/hooks/useAgentAction';
 import { InlineError } from '@/components/ui/InlineError';
 import { thunks } from '@/store/agentRuntime';
 import {
   chainsAwaitingRegeneration,
   claimQuest,
+  confirmQuestChain,
   createManualQuest,
   openTurnIn,
-  reviewQuestDraft,
+  rejectQuestChain,
   startQuest,
+  successorOf,
   type RegenerationCandidate,
 } from '@/store/operations';
 import { useMutate, useSave } from '@/store/useEarthOnlineStore';
-import type { ClassIdLiteral, Quest } from '@/types';
+import type { ClassIdLiteral, Quest, QuestChain } from '@/types';
 
 type BountyTab = 'board' | 'active' | 'review' | 'spark';
 
@@ -43,10 +45,23 @@ interface BountyPanelProps {
  *
  * Phase 2 收官时它从"任务流的前半段"长成了**四联中枢**：
  *
- *   「悬赏板」  offered                        —— 要不要接
+ *   「悬赏板」  offered 且前置完成               —— 要不要接（现在就能接的）
  *   「进行中」  claimed / active / turn_in_pending —— 做没做完（自日常面板彻底迁入）
- *   「待议」    draft                          —— AI 给的草稿，通过或打回
- *   「灵感」    spark                          —— 把一句想法铸成任务链
+ *   「待议」    链上有草稿                      —— 整条线一次裁决（轮 C）
+ *   「灵感」    spark                           —— 把一句想法铸成任务链
+ *
+ * ---------------------------------------------------------------------------
+ * 轮 C：线级裁决 + 渐进揭开（这一屏的两条新规矩）
+ * ---------------------------------------------------------------------------
+ *   ① 审核是**线级**的。玩家在「待议」看到的是整条线的样子 —— 主题、理由、
+ *      每一步的标题 —— 然后一次「确认这条线」或「打回重来」。
+ *      落成数据后只有第一步会出现在悬赏板上；每完成一步，下一步才被揭开
+ *      （未解锁的步骤在板上**根本不出现**，不是灰卡）。
+ *   ② 于是悬赏板上的每一条都满足同一句话：**它现在就能接**。
+ *      板上数出来的数与"此刻能做的动作"一一对应 —— 那是这四联中枢
+ *      所有角标的共同口径（见 selectors.navBadges）。
+ *   修理单步（换个做法）发生在步骤被揭开之后：那时它在板上，是一张
+ *   完整的 OfferCard —— 所以卡片上带着「换个做法」。
  *
  * ---------------------------------------------------------------------------
  * 「进行中」为什么搬到这里，而不是留在日常面板
@@ -61,9 +76,9 @@ interface BountyPanelProps {
  * 为什么「待议」独立成一栏，而不是留在悬赏板上
  * ---------------------------------------------------------------------------
  * 悬赏板上剩下的事有一个共同点：**它们已经是事实了**，你只是在决定什么时候动手。
- * 而「通过 / 打回」是**在修改世界的清单** —— 判错了，你要么背上一件不该做的事，
+ * 而「确认 / 打回」是**在修改世界的清单** —— 判错了，你要么背上一件不该做的事，
  * 要么少一个台阶。两种动作的心理成本完全不同，混在一屏里的后果是玩家会开始
- * 批量点「通过」。分开之后，"裁决"重新变得是个决定。
+ * 批量点「确认」。分开之后，"裁决"重新变得是个决定。
  *
  * 铸造完仍然直接切回「待议」—— 让玩家立刻面对自己刚生成的东西。
  *
@@ -83,8 +98,10 @@ export function BountyPanel({ panel, onClose }: BountyPanelProps) {
   // 所以按 id 查，而不是把 Quest 对象本身存进 state
   const [turnInId, setTurnInId] = useState<string | null>(null);
 
-  const drafts = draftQuests(save);
-  const offered = questsByStatus(save, 'offered');
+  // 板上只放"现在就能接的"。这是 claimableQuests 的全部含义（offered + 前置完成）
+  const board = claimableQuests(save);
+  // 「待议」数的是**线**，不是草稿 —— 一个数字背后是一次线级裁决（见 navBadges）
+  const pendingLines = chainsAwaitingReview(save);
   const inHand = inHandQuests(save);
 
   const turnInQuest = turnInId ? save.quests.byId[turnInId] : undefined;
@@ -94,9 +111,9 @@ export function BountyPanel({ panel, onClose }: BountyPanelProps) {
       active={tab}
       onChange={(k) => setTab(k as BountyTab)}
       tabs={[
-        { key: 'board', label: '悬赏板', badge: offered.length },
+        { key: 'board', label: '悬赏板', badge: board.length },
         { key: 'active', label: '进行中', badge: inHand.length },
-        { key: 'review', label: '待议', badge: drafts.length },
+        { key: 'review', label: '待议', badge: pendingLines.length },
         { key: 'spark', label: '灵感' },
       ]}
     />
@@ -107,8 +124,8 @@ export function BountyPanel({ panel, onClose }: BountyPanelProps) {
       <PanelShell panel={panel} onClose={onClose} subheader={subheader}>
         {tab === 'board' ? (
           <BoardTab
-            offered={offered}
-            draftCount={drafts.length}
+            claimable={board}
+            pendingLineCount={pendingLines.length}
             inHandCount={inHand.length}
             onGoToSpark={() => setTab('spark')}
             onGoToReview={() => setTab('review')}
@@ -117,7 +134,7 @@ export function BountyPanel({ panel, onClose }: BountyPanelProps) {
         ) : tab === 'active' ? (
           <ActiveTab onOpenTurnIn={setTurnInId} onGoToBoard={() => setTab('board')} />
         ) : tab === 'review' ? (
-          <ReviewTab drafts={drafts} onGoToSpark={() => setTab('spark')} />
+          <ReviewTab chains={pendingLines} onGoToSpark={() => setTab('spark')} />
         ) : (
           <SparkTab onForged={() => setTab('review')} />
         )}
@@ -133,15 +150,17 @@ export function BountyPanel({ panel, onClose }: BountyPanelProps) {
 // ---------------------------------------------------------------------------
 
 function BoardTab({
-  offered,
-  draftCount,
+  claimable,
+  pendingLineCount,
   inHandCount,
   onGoToSpark,
   onGoToReview,
   onGoToActive,
 }: {
-  offered: Quest[];
-  draftCount: number;
+  /** 现在就能接的（offered 且前置全完成）—— 见 selectors.claimableQuests */
+  claimable: Quest[];
+  /** 还有几条线等着裁决（数字用在线级入口上，不是草稿条数） */
+  pendingLineCount: number;
   inHandCount: number;
   onGoToSpark: () => void;
   onGoToReview: () => void;
@@ -205,7 +224,7 @@ function BoardTab({
         </button>
       </div>
       <p className="text-[10.5px] leading-relaxed text-white/30">
-        调度员出的题落在「待议」等你过目；自己写的那条直接进「进行中」。
+        调度员出的题落在「待议」等你裁决；自己写的那条直接进「进行中」。
       </p>
 
       {error && <InlineError message={error} onDismiss={clearError} />}
@@ -234,16 +253,17 @@ function BoardTab({
         </div>
       )}
 
-      {offered.length === 0 ? (
+      {claimable.length === 0 ? (
         // 三个去处各自有条路：待议 > 进行中 > 写想法，按"离你最近的一步"排
-        draftCount > 0 ? (
+        pendingLineCount > 0 ? (
           <EmptyNote
-            text="板上没有能接的 —— 但待议栏里还有东西等你过目。"
-            action={{ label: `去待议（${draftCount}）`, onClick: onGoToReview }}
+            text="板上没有能接的 —— 但待议栏里还有线等你裁决。"
+            action={{ label: `去待议（${pendingLineCount}）`, onClick: onGoToReview }}
           />
         ) : inHandCount > 0 ? (
           <EmptyNote
-            text={`板上暂时没有新的 —— 你手上还有 ${inHandCount} 件在推进。做完它们，板子自己会更新。`}
+            // 轮 C 之后这句话是字面为真的：下一步要等你完成手上这步才揭开
+            text={`板上暂时没有新的 —— 你手上还有 ${inHandCount} 件在推进。每完成一步，下一步才会在板上揭开。`}
             action={{ label: '去看进行中', onClick: onGoToActive }}
           />
         ) : (
@@ -253,8 +273,8 @@ function BoardTab({
           />
         )
       ) : (
-        <Group title="可接" hint="前置没完成的，接了也开不了工">
-          {offered.map((q) => (
+        <Group title="可接" hint="板上每一条都是现在就能接的 —— 每完成一步，下一步才揭开">
+          {claimable.map((q) => (
             <OfferCard key={q.id} quest={q} />
           ))}
         </Group>
@@ -461,19 +481,19 @@ function ActiveTab({
 }
 
 // ---------------------------------------------------------------------------
-// Tab · 待议（逐条裁决 AI 给的草稿）
+// Tab · 待议（线级裁决：整条线一次确认或打回）
 // ---------------------------------------------------------------------------
 
-function ReviewTab({ drafts, onGoToSpark }: { drafts: Quest[]; onGoToSpark: () => void }) {
+function ReviewTab({ chains, onGoToSpark }: { chains: QuestChain[]; onGoToSpark: () => void }) {
   const save = useSave();
   // 整条链都被打回的那些 —— 它们是「整链重抽」唯一的入口。
   // 判据在 operations 里有一份对应的守卫，两边必须一致（见 chainsAwaitingRegeneration）
   const rebuildable = chainsAwaitingRegeneration(save);
 
-  if (drafts.length === 0 && rebuildable.length === 0) {
+  if (chains.length === 0 && rebuildable.length === 0) {
     return (
       <EmptyNote
-        text="没有待议的东西。AI 给你的草稿在通过之前都停在这里 —— 板子干净，说明该做的判断你都做完了。"
+        text="没有待议的东西。AI 给的线在确认之前都停在这里 —— 板子干净，说明该做的判断你都做完了。"
         action={{ label: '写下一个想法', onClick: onGoToSpark }}
       />
     );
@@ -481,14 +501,14 @@ function ReviewTab({ drafts, onGoToSpark }: { drafts: Quest[]; onGoToSpark: () =
 
   return (
     <div className="space-y-4 pt-3.5">
-      {drafts.length > 0 && (
+      {chains.length > 0 && (
         <Group
           title="待你过目"
           tone="gold"
-          hint="AI 生成的东西，你点头之前不算数。这是一次裁决，不是一次确认 —— 不合适的直接打回，或者让它换个做法。"
+          hint="AI 生成的东西，你点头之前不算数。看到的是一条完整的线：主题、理由、每一步的标题 —— 看完一次裁决。"
         >
-          {drafts.map((q) => (
-            <DraftCard key={q.id} quest={q} />
+          {chains.map((chain) => (
+            <LineReviewCard key={chain.id} chain={chain} />
           ))}
         </Group>
       )}
@@ -658,28 +678,21 @@ const classLabel = (classId: Quest['classId']): string | null =>
   classId ? classLabelOf(classId) : null;
 
 /**
- * 卡片公共骨架。四种卡片共用它，避免"草稿卡片少一个星级"这种细节漂移。
+ * 卡片公共骨架。三种卡片共用它，避免"某张卡片少一个星级"这种细节漂移。
  * `footer` 是各自的按钮区，`children` 是状态专属的中段。
  */
 function CardShell({
   quest,
   children,
   footer,
-  highlight,
 }: {
   quest: Quest;
   children?: ReactNode;
   footer: ReactNode;
-  highlight?: boolean;
 }) {
   const label = classLabel(quest.classId);
   return (
-    <article
-      className={cn(
-        'glass-hover rounded-xl border p-3.5',
-        highlight ? 'border-amber-400/30 bg-amber-400/[0.06]' : 'border-white/10 bg-white/[0.04]',
-      )}
-    >
+    <article className="glass-hover rounded-xl border border-white/10 bg-white/[0.04] p-3.5">
       <div className="flex items-center gap-2">
         {label && (
           <span className="rounded-md border border-abyss-500/30 bg-abyss-500/15 px-1.5 py-0.5 text-[10px] leading-[1.4] text-abyss-300">
@@ -716,31 +729,160 @@ function CardShell({
   );
 }
 
+/** 链上每一步在审核卡上的状态词。没写的就是「待裁决」—— 不额外加一行噪音 */
+const STEP_STATUS_LABEL: Partial<Record<Quest['status'], string>> = {
+  offered: '已通过',
+  claimed: '已领取',
+  active: '进行中',
+  turn_in_pending: '待结算',
+  completed: '已完成',
+};
+
 /**
- * 一条待裁决的草稿。
+ * 一条待裁决的线（轮 C 的线级审核卡）。
  *
- * 三个出口，不是两个：
- *   通过   —— 这件事就这么做
- *   打回   —— 这件事不该出现在我的清单上（剔除出链，痕迹留作偏好信号）
- *   换个做法 —— **这件事是对的，但这一步的做法不对**
+ * 两个出口，不是三个：
+ *   确认这条线 —— 整条线就这么走。确认后只有第一步落在悬赏板上
+ *   打回重来   —— 整条线都不对。全否之后它会出现在「推倒重来」里，
+ *                 还留着终身一次的整链重抽
  *
- * 第三个是 Phase 3 补上的。缺了它，玩家只有"接受"和"全盘否掉"两种表达，
- * 而真实的想法往往卡在中间：路线没错，只是这一步走不通。
- * 逼着人在这种时候二选一，结果就是要么收下一条做不下去的任务，
- * 要么丢掉一个本来正确的方向。
+ * 为什么把逐条裁决收成一次：
+ *   玩家在确认时看到的是整条线的形状 —— 主题、理由、每一步的标题。
+ *   逐条点「通过」把一次判断拆成了 N 次点击，而每一次点击都不比看清整条线
+ *   更有信息量。真正的裁决对象本来就是**这条线值不值得走**。
  *
- * ⚠️ 只对**链上的**草稿出现。单任务没有"下一步"，重写成什么样都无从谈起 ——
- *     所以单任务卡片上不会长这颗按钮（`rerouteQuestDraft` 自己也会拦下）。
+ * 为什么单步的「换个做法」不在这里：
+ *   线还没被确认时，"这一步做不做得了"是个假设 —— 玩家要等它被揭开、
+ *   真正轮到它，才知道哪里卡住。所以「换个做法」长在悬赏板的卡片上
+ *   （那时它已经摆在面前），不在这张预览卡上。
  */
-function DraftCard({ quest }: { quest: Quest }) {
+function LineReviewCard({ chain }: { chain: QuestChain }) {
+  const save = useSave();
+  const mutate = useMutate();
+  const [confirming, setConfirming] = useState(false);
+
+  // 链上还站着的步骤。被打回 / 被换掉的已经从线上退场（痕迹留在状态里），
+  // 不再出现在这张卡上 —— 卡上列出的，是确认之后真正会走的那条路
+  const steps = chain.questIds
+    .map((id) => save.quests.byId[id])
+    .filter((q): q is Quest => Boolean(q) && q.status !== 'rejected' && q.status !== 'rerouted');
+
+  // 参谋意见逐条冗余在任务上，整条线取第一条非空的就是那份"审核官的话"
+  const note = steps.find((q) => q.origin.reviewerNote)?.origin.reviewerNote ?? null;
+  const label = classLabelOf(chain.classId);
+
+  const confirm = () => mutate((s) => confirmQuestChain(s, chain.id, new Date()));
+  const reject = () => mutate((s) => rejectQuestChain(s, chain.id, new Date()));
+
+  return (
+    <article className="glass-hover rounded-xl border border-amber-400/25 bg-amber-400/[0.05] p-3.5">
+      <div className="flex items-center gap-2">
+        <span className="rounded-md border border-abyss-500/30 bg-abyss-500/15 px-1.5 py-0.5 text-[10px] leading-[1.4] text-abyss-300">
+          {label}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[13px] font-medium tracking-wide text-white/90">
+          {chain.title}
+        </span>
+        <span className="numeric shrink-0 text-[10px] text-white/35">{steps.length} 步</span>
+      </div>
+
+      <p className="prose-cinematic mt-1.5 text-[11px] leading-relaxed text-white/50">
+        {chain.rationale}
+      </p>
+
+      <ol className="mt-3 space-y-1.5">
+        {steps.map((q) => (
+          <li
+            key={q.id}
+            className="flex items-baseline gap-2 rounded-lg border border-white/[0.07] bg-ink-950/35 px-2.5 py-2"
+          >
+            <span className="numeric shrink-0 text-[10.5px] text-white/30">
+              {q.chain ? q.chain.index + 1 : '·'}
+            </span>
+            <span className="min-w-0 flex-1 break-words text-[12px] leading-relaxed text-white/80">
+              {q.title}
+            </span>
+            <span className="numeric shrink-0 text-[10.5px] leading-none tracking-wider text-amber-400/70">
+              {'★'.repeat(q.difficulty)}
+            </span>
+            {/* 已经走过的步骤（半途生成的线、或者之前已确认过的成员）带上自己的状态 */}
+            {STEP_STATUS_LABEL[q.status] && (
+              <span className="shrink-0 text-[10px] text-white/35">{STEP_STATUS_LABEL[q.status]}</span>
+            )}
+          </li>
+        ))}
+      </ol>
+
+      {note && (
+        <div className="mt-3 border-l-2 border-abyss-500/60 pl-2.5">
+          <div className="text-[10px] tracking-wider text-abyss-300/80">参谋意见</div>
+          <p className="prose-cinematic mt-0.5 text-[11.5px] leading-relaxed text-white/65">{note}</p>
+        </div>
+      )}
+
+      <p className="mt-3 text-[10.5px] leading-relaxed text-white/35">
+        确认之后，只有第一步会出现在悬赏板上；每完成一步，下一步才揭开。
+      </p>
+
+      <div className="mt-2.5 flex items-center gap-2">
+        {confirming ? (
+          <>
+            <button
+              type="button"
+              onClick={() => setConfirming(false)}
+              className="glass-pill glass-hover px-2.5 py-1.5 text-[11px] text-white/55"
+            >
+              再想想
+            </button>
+            <button
+              type="button"
+              onClick={reject}
+              className="ml-auto rounded-lg border border-white/25 bg-white/[0.06] px-3 py-1.5 text-[11.5px] text-white/80 transition-all duration-300 ease-cinematic hover:border-amber-400/45 hover:text-white"
+            >
+              全都打回
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={() => setConfirming(true)}
+              className="glass-pill glass-hover px-2.5 py-1.5 text-[11.5px] text-white/60"
+            >
+              打回重来
+            </button>
+            <button
+              type="button"
+              onClick={confirm}
+              className="ml-auto rounded-lg border border-amber-400/50 bg-amber-400/[0.15] px-3 py-1.5 text-[11.5px] text-amber-100 shadow-glow-gold transition-all duration-300 ease-cinematic hover:scale-[1.03] hover:bg-amber-400/[0.25]"
+            >
+              确认这条线
+            </button>
+          </>
+        )}
+      </div>
+    </article>
+  );
+}
+
+/**
+ * 悬赏板上的一条：现在就能接。
+ *
+ * 轮 C 起它同时是"被揭开的那一步"的完整模样 —— 所以卡上带着两样东西：
+ *   ① 这一步到底要做什么（objective）。确认那条线时只看到了标题，
+ *      真正决定接不接的时刻是现在，不是那时。
+ *   ② 「换个做法」。线确认过之后，单步的修理发生在这里（额度仍是
+ *      链级 2 次）。草稿态的换法没有入口 —— 那时这一步还没轮到，
+ *      "做不做得了"只是个假设（见 LineReviewCard 的说明）。
+ *
+ * 不再有"前置没完成"的灰卡：前置没完成的步骤在板上**不会出现**。
+ */
+function OfferCard({ quest }: { quest: Quest }) {
   const save = useSave();
   const mutate = useMutate();
   const { busy, error, run, clearError } = useAgentAction();
   const [open, setOpen] = useState(false);
   const [request, setRequest] = useState('');
-
-  const resolve = (decision: 'approve' | 'reject') =>
-    mutate((s) => reviewQuestDraft(s, quest.id, decision, new Date()));
 
   const membership = quest.chain;
   const chain = membership ? save.quests.chains[membership.chainId] : undefined;
@@ -748,11 +890,12 @@ function DraftCard({ quest }: { quest: Quest }) {
   const remaining = REROUTE_CHAIN_LIMIT - used;
   const reroutable = Boolean(membership) && remaining > 0;
 
+  // 下一步（末一步时为 null）—— 只用来把"揭开"这件事说清楚
+  const successor = membership ? successorOf(save, membership.chainId, membership.index) : null;
+
   const reroute = () => {
     void run(async () => {
-      // 空诉求不再在这里替换成 DEFAULT_REROUTE_REQUEST ——
-      // 那件事现在只有一个执行点（`rerouteQuestDraft` 与 thunk 共用同一条归一化），
-      // 在这里也替一次会让两处对"玩家到底说了什么"产生两个答案。
+      // 空诉求在 `rerouteQuestDraft` 与 thunk 的同一条归一化里收口，这里不替一次
       const result = await thunks.reroute({ questId: quest.id, request });
       if (result.ok) {
         setRequest('');
@@ -765,18 +908,10 @@ function DraftCard({ quest }: { quest: Quest }) {
   return (
     <CardShell
       quest={quest}
-      highlight
       footer={
         <div className="flex gap-1.5">
-          <button
-            type="button"
-            onClick={() => resolve('reject')}
-            className="glass-pill glass-hover px-2.5 py-1.5 text-[11.5px] text-white/60"
-          >
-            打回
-          </button>
           {/* 额度用尽时它不消失，只是变成一行字 —— 按钮消失会让人以为这个功能不存在 */}
-          {reroutable ? (
+          {reroutable && (
             <button
               type="button"
               onClick={() => setOpen((v) => !v)}
@@ -788,27 +923,18 @@ function DraftCard({ quest }: { quest: Quest }) {
             >
               换个做法
             </button>
-          ) : null}
+          )}
           <button
             type="button"
-            onClick={() => resolve('approve')}
+            onClick={() => mutate((s) => claimQuest(s, quest.id, new Date()))}
             className="rounded-lg border border-amber-400/45 bg-amber-400/[0.12] px-2.5 py-1.5 text-[11.5px] text-amber-200 transition-all duration-300 ease-cinematic hover:scale-[1.04] hover:bg-amber-400/[0.22]"
           >
-            通过
+            领取
           </button>
         </div>
       }
     >
       <p className="mt-2 text-[11px] leading-relaxed text-white/45">{quest.objective}</p>
-
-      {quest.origin.reviewerNote && (
-        <div className="mt-2.5 border-l-2 border-abyss-500/60 pl-2.5">
-          <div className="text-[10px] tracking-wider text-abyss-300/80">参谋意见</div>
-          <p className="prose-cinematic mt-0.5 text-[11.5px] leading-relaxed text-white/65">
-            {quest.origin.reviewerNote}
-          </p>
-        </div>
-      )}
 
       {/* 上一版是怎么被换掉的 —— 留在卡片上，玩家才知道这两步的差别在哪 */}
       {quest.origin.rerouteHistory.length > 0 && (
@@ -821,6 +947,14 @@ function DraftCard({ quest }: { quest: Quest }) {
             {quest.origin.rerouteHistory[quest.origin.rerouteHistory.length - 1]!.before.difficulty} ★
           </p>
         </div>
+      )}
+
+      {membership && (
+        <p className="mt-2 text-[10.5px] leading-relaxed text-white/30">
+          {successor
+            ? `完成后，下一步「${successor.title}」才会在板上揭开。`
+            : '这是这条线的最后一步 —— 做完它，这条线就走完了。'}
+        </p>
       )}
 
       {/* 微型输入框：一行的位置，问一个问题 */}
@@ -859,55 +993,6 @@ function DraftCard({ quest }: { quest: Quest }) {
             </button>
           </div>
           {error && <InlineError message={error} onDismiss={clearError} />}
-        </div>
-      )}
-    </CardShell>
-  );
-}
-
-function OfferCard({ quest }: { quest: Quest }) {
-  const save = useSave();
-  const mutate = useMutate();
-
-  // 未完成的前置 —— 界面用它解释"为什么按钮是灰的"
-  const blockers = quest.prerequisiteQuestIds
-    .map((id) => save.quests.byId[id])
-    .filter((q): q is Quest => Boolean(q) && q.status !== 'completed');
-  const locked = blockers.length > 0;
-
-  return (
-    <CardShell
-      quest={quest}
-      footer={
-        <button
-          type="button"
-          disabled={locked}
-          onClick={() => mutate((s) => claimQuest(s, quest.id, new Date()))}
-          className={cn(
-            'rounded-lg border px-2.5 py-1.5 text-[11.5px] transition-all duration-300 ease-cinematic',
-            locked
-              ? 'cursor-not-allowed border-white/10 bg-white/[0.04] text-white/30'
-              : 'border-amber-400/45 bg-amber-400/[0.12] text-amber-200 hover:scale-[1.04] hover:bg-amber-400/[0.22]',
-          )}
-        >
-          领取
-        </button>
-      }
-    >
-      {locked && (
-        <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          <span className="text-[10px] tracking-wider text-white/30">前置</span>
-          {blockers.map((b) => (
-            <span
-              key={b.id}
-              className="rounded-md border border-white/10 bg-ink-950/40 px-1.5 py-0.5 text-[10px] text-white/45"
-            >
-              {b.title}
-              <span className="ml-1 text-white/25">
-                {b.status === 'active' ? '进行中' : b.status === 'turn_in_pending' ? '待结算' : '未完成'}
-              </span>
-            </span>
-          ))}
         </div>
       )}
     </CardShell>
@@ -1045,7 +1130,8 @@ function SparkTab({ onForged }: { onForged: () => void }) {
       {error && <InlineError message={error} onDismiss={clearError} />}
 
       <p className="mt-3 text-[10.5px] leading-relaxed text-white/30">
-        生成的是草稿，还不算数 —— 你要逐条看过，通过了它才会出现在悬赏板上。
+        生成的是草稿，还不算数 —— 你会先看到整条线的样子，确认之后，
+        只有第一步会出现在悬赏板上；每完成一步，下一步才揭开。
       </p>
     </div>
   );

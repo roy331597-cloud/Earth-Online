@@ -71,9 +71,15 @@ export interface ForgeOutput {
   reviewerNote: string | null;
 }
 
-/** 一条链最少/最多的任务数（产品口径，见指令："2~3 个任务"） */
+/**
+ * 一条链最少/最多的任务数（产品口径）。
+ *
+ * 轮 C 后上限抬到 5：一条线通常 3~5 步，每步 30 分钟~4 小时、当天做完。
+ * 下限保持 2 是种子目录的地板 —— 四条职业线各有 9 条种子，正常都在上限处截断；
+ * MIN 只在目录异常时兜底（宁可重复出题，也不要给玩家一条只有一步的"链"）。
+ */
 const MIN_DRAFTS = 2;
-const MAX_DRAFTS = 3;
+const MAX_DRAFTS = 5;
 
 /** 截断到 n 个字符，超出补省略号 */
 const clip = (text: string, n: number): string => {
@@ -100,7 +106,7 @@ export const mockForge = (input: ForgeInput): ForgeOutput => {
   const drafts = [...fresh, ...used].slice(0, MAX_DRAFTS);
 
   if (drafts.length < MIN_DRAFTS) {
-    // 目录里种子不够（理论上不会发生：四条职业线各 2~3 条）
+    // 目录里种子不够（理论上不会发生：四条职业线各 9 条种子）
     throw new Error(`[mockForge] ${classId} 的种子任务不足，无法成链`);
   }
 

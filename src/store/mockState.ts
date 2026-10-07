@@ -269,10 +269,10 @@ const QUESTS: Quest[] = [
     },
   }),
 
-  // —— 待领取：已通过审核，但前置（Docker 那条）还没完成 ——
-  //    它会出现在悬赏板上，却不能领取。这条数据是**故意**留的：
-  //    门控逻辑一接上就能立刻看到效果 —— 一处「有前置所以灰掉」的活样本，
-  //    同时也是"结算掉 q_cb_docker 它就会解禁"这条闭环的起点。
+  // —— 还没揭开：已通过审核，但前置（Docker 那条）还没完成 ——
+  //    轮 C 起它在悬赏板上**根本不出现**（渐进揭开：做完上一步才看到下一步），
+  //    不是灰卡。这条数据是**故意**留的活样本：
+  //    结算掉 q_cb_docker，它就会在板上被揭开 —— 那条闭环的起点就在这里。
   mkQuest({
     id: 'q_cb_questions',
     status: 'offered',
@@ -309,7 +309,7 @@ const QUESTS: Quest[] = [
     },
   }),
 
-  // —— 待审核：链上第二步还停在 draft，等玩家逐条过目 ——
+  // —— 待审核：链上第二步还停在 draft，等玩家对整条线做一次裁决 ——
   mkQuest({
     id: 'q_inv_rulebook',
     status: 'draft',
@@ -336,9 +336,8 @@ for (const q of QUESTS) questsById[q.id] = q;
  *
  * 两条链的 review 状态是刻意错开的，覆盖两种真实情形：
  *   - 复现链：三条全部 resolve 过（完成 / 执行中 / 待领取），`reviewedAt` 已落定；
- *   - 风控链：第二条还停在 draft（等着逐条过目），所以 `reviewedAt` 仍为 null、
- *     重生成额度一次都没用掉 —— Phase 3 接入 `RegenerateQuestChain` 时，
- *     这条链就是现成的测试样本。
+ *   - 风控链：第二条还停在 draft（等着做一次线级裁决），所以 `reviewedAt` 仍为 null、
+ *     重生成额度一次都没用掉 —— 「确认这条线」与整链重抽的现成测试样本。
  *
  * `linkedGoalIds` 取该链各成员的并集（见 catalog/classes.ts 的 seedQuests）。
  */

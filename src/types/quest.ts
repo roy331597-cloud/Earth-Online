@@ -61,7 +61,7 @@ export interface RewardGrant {
 // ---------------------------------------------------------------------------
 
 export type QuestStatus =
-  | 'draft'            // AI 已生成，等待玩家审核（链式任务：整条系列一并列出，玩家**逐条**通过/打回）
+  | 'draft'            // AI 已生成，等待玩家审核（轮 C：整条线一次裁决 —— 主题/理由/每步标题过目后「确认这条线」）
   | 'offered'          // 该条已审核通过，玩家可领取
   | 'claimed'          // 已进入任务清单，尚未开始
   | 'active'           // 执行中
@@ -79,11 +79,16 @@ export type QuestType = 'main' | 'side' | 'special' | 'milestone';
 /**
  * 任务链元信息。
  *
- * 本次修订：取消了"一次只露出下一个"的渐进可见门控（原 `revealed` 字段）。
- * 现在是**审核门控 + 逐条通过**——draft 阶段整条系列全部列出给玩家过目，
- * 玩家对每个任务单独 resolve（通过 → [offered] / 打回 → [rejected]）；
- * 「领取」时按 `index` 顺序推进，前置未完成的节点可见但不可领取
- * （由 `Quest.prerequisiteQuestIds` 判定）。
+ * 轮 C（PO 裁定）之后的完整规则，两条：
+ *
+ *   ① **审核是一次线级的**：draft 阶段整条线一起展示（主题、理由、每步标题），
+ *      玩家点一次「确认这条线」（ConfirmQuestChain），全部成员一起过审；
+ *   ② **执行是渐进的**：确认后只有第一步出现在悬赏板上，**每完成一步，
+ *      下一步才被揭开** —— 未解锁的步骤不是灰掉的卡片，是不存在。
+ *      （判据就是下面的 `Quest.prerequisiteQuestIds`，见 selectors.claimableQuests。）
+ *
+ * 这不是老 `revealed` 字段的回归：那个字段把"看到"存在了存档里，
+ * 而这里"看到"是前置状态的**派生**——链自己不需要记住谁被揭开了。
  */
 export interface ChainMembership {
   chainId: ChainId;
@@ -209,12 +214,12 @@ export interface QuestState {
 /**
  * 任务链的审核记录（链级信息）。
  *
- * 审核粒度是**逐条的**：每个任务在审核面板上单独 resolve
- * （draft → offered 或 draft → rejected，状态记在 Quest 自己身上）。
- * 链因此不再持有"已通过 / 被拒绝"的整体状态——它是派生物
+ * 审核的主入口是**线级的**（ConfirmQuestChain / RejectQuestChain，轮 C），
+ * 落到数据上仍是逐条 resolve（draft → offered / rejected，状态记在 Quest 自己身上）——
+ * 链因此不持有"已通过 / 被拒绝"的整体状态，它是派生物
  * （全部成员 resolve 完毕即视为审核结束，此时 reviewedAt 落定）。
  *
- * 这里的字段只承载"链级"的两件事：玩家对整链的备注，
+ * 这里的字段只承载"链级"的两件事：玩家对整条线的备注，
  * 以及"整条链都被打回"时的一次重生成额度。
  */
 export interface ChainReview {
@@ -272,7 +277,7 @@ export interface QuestChain {
   questIds: QuestId[];
   linkedGoalIds: GoalId[];
   createdAt: ISODateTime;
-  /** 玩家审核记录（逐条通过；全部成员 resolve 后 reviewedAt 落定） */
+  /** 玩家审核记录（线级确认 / 打回；全部成员 resolve 后 reviewedAt 落定） */
   review: ChainReview;
   completed: boolean;
 }

@@ -42,6 +42,7 @@ import type {
   CheckWeekly,
   ClaimQuest,
   CompleteQuest,
+  ConfirmQuestChain,
   ConsultNetworkSolver,
   Contact,
   CreateContact,
@@ -79,6 +80,7 @@ import type {
   ReflectionQuality,
   ReflectionVerdict,
   RegenerateQuestChain,
+  RejectQuestChain,
   RerouteQuestDraft,
   RerouteRecord,
   ReviewQuestDraft,
@@ -622,7 +624,12 @@ export const claimQuest: ClaimQuest = (state, questId, now) => {
 };
 
 /**
- * 逐条审核草稿：draft -> offered（通过）或 draft -> rejected（打回）。
+ * 单条裁决草稿：draft -> offered（通过）或 draft -> rejected（打回）。
+ *
+ * 轮 C 之后玩家的主入口是**线级的**（confirmQuestChain / rejectQuestChain，
+ * 见下方），这个函数退居为它们脚下的机械，逐条执行同一套状态流转。
+ * 之所以保留单条形态：链级操作本质上就是"对每个 draft 成员各做一次裁决"，
+ * 把它写成一个循环调用，比复制两份状态机安全。
  *
  * 三条刻意的设计：
  *   ① **打回不删任务**。任务本身留在存档里（`status: 'rejected'`），
@@ -698,10 +705,61 @@ export const reviewQuestDraft: ReviewQuestDraft = (state, questId, decision, now
 };
 
 /**
+ * 线级确认：整条链一次裁决（轮 C 的主入口）。
+ *
+ * 玩家看到的是线的主题、理由与每一步的标题，点一次「确认这条线」，
+ * 链内全部 draft 成员一起过审。落到数据上仍是逐个 resolve ——
+ * 循环调用 reviewQuestDraft('approve')，最后一条 resolve 时
+ * reviewedAt 由既有规则自动落定，这里不重复实现。
+ *
+ * 两条刻意的不做：
+ *   ① 不"顺带领取第一步"。确认 ≠ 接取 —— 确认后第一步出现在悬赏板上，
+ *      领取仍是玩家在板上的一次独立点击（也是 claimQuest 的既有门槛）。
+ *   ② 不动链以外的任何东西。确认只产生 offered，不触发任何 AI 调用。
+ *
+ * 返回原对象的惯例照旧：链不存在、或链内没有任何 draft 时，无事发生。
+ */
+export const confirmQuestChain: ConfirmQuestChain = (state, chainId, now) => {
+  const chain = state.quests.chains[chainId];
+  if (!chain) return state;
+
+  let next = state;
+  for (const id of chain.questIds) {
+    if (next.quests.byId[id]?.status === 'draft') next = reviewQuestDraft(next, id, 'approve', now);
+  }
+  return next;
+};
+
+/**
+ * 线级打回：整条链一次拒绝（轮 C 的主入口）。
+ *
+ * 与确认对称，逐条走 reviewQuestDraft('reject') —— 也就是那套既有的
+ * "摘链 + 解开别人对它的前置依赖"机制，一个字也不另写：
+ * 全部成员被打回后 questIds 摘空，链成为一条空壳，同时因为它有
+ * regenerationCount 额度，会出现在 `chainsAwaitingRegeneration` 里，
+ * 玩家可以「整条线重来」（regenerateQuestChain，终身 1 次）。
+ *
+ * 注意迭代的是 `chain.questIds` 的**原快照**：reject 会把成员逐个摘出
+ * next 里的 questIds，但 id 本身仍是 byId 的有效引用，逐个裁决不受影响。
+ * 已在 offered/claimed 等状态的成员不会被误伤（reviewQuestDraft 只处理 draft）。
+ */
+export const rejectQuestChain: RejectQuestChain = (state, chainId, now) => {
+  const chain = state.quests.chains[chainId];
+  if (!chain) return state;
+
+  let next = state;
+  for (const id of chain.questIds) {
+    if (next.quests.byId[id]?.status === 'draft') next = reviewQuestDraft(next, id, 'reject', now);
+  }
+  return next;
+};
+
+/**
  * 从一句灵感铸造一条链（Spark Box）—— 非日常任务的唯一入口。
  *
- * 产出**全部落在 `draft`**：铸造 ≠ 生效。玩家还得逐条过目（reviewQuestDraft），
- * 通过了才进得了悬赏板。这条规则没有例外，包括玩家自己写的灵感 ——
+ * 产出**全部落在 `draft`**：铸造 ≠ 生效。玩家还得把整条线过目一遍
+ * （confirmQuestChain，轮 C 起为线级一次裁决），确认了第一步才进得了悬赏板。
+ * 这条规则没有例外，包括玩家自己写的灵感 ——
  * 因为 AI 生成的东西在玩家点头之前，本来就不该拥有任何效力。
  *
  * 🔻 Phase 4 换真身时，改的只有 `mockForge` 这一行调用。
@@ -1672,19 +1730,23 @@ export const successorOf = (state: EarthOnlineState, chainId: string, index: num
  *
  * 形状 B 的落地（见 docs/phase2/reroute-design.md §3.1）。五步：
  *
- *   ① 只对**链式草稿**开放。reroute 的存在意义是"这一步通不到下一步"，
- *      而单条任务没有下一步 —— 对它，玩家该用的是打回。
+ *   ① 只对**链式任务**开放（draft 或 offered）。reroute 的存在意义是
+ *      "这一步通不到下一步"，而单条任务没有下一步 —— 对它，玩家该用的是打回。
+ *      轮 C 起一条线确认后只有第一步被揭开，后面的步骤会在**已过审但还没轮到**
+ *      的处境里发现"这步我做不了"—— 所以 offered 也要能换法，否则玩家只能
+ *      先领取再打回，比换法多绕一圈。
  *   ② 额度来自 `ChainReview.rerouteCount`（链级软上限 2 次）。
  *   ③ 让 mockReroute 生成替换件（Phase 4 换成模型，见该文件顶部的删除标记）。
  *      两条红线在那边落地：降难度必降奖励、必带后继的 objective 原文。
- *   ④ 旧任务 `draft -> rerouted` 留档，**不删**。
- *   ⑤ 新任务落回同一条链的同一个 index，仍是 draft —— 它还要过一次审核。
+ *   ④ 旧任务 `draft/offered -> rerouted` 留档，**不删**。
+ *   ⑤ 新任务落回同一条链的同一个 index，**继承原状态** ——
+ *      草稿换出草稿（还要过一次审核），已过审换出已过审（直接可用）。
  *
  * ⚠️ 与 mockForge 那一行一样：Phase 4 换真身时改的是 `mockReroute` 这一行调用。
  */
 export const rerouteQuestDraft: RerouteQuestDraft = (state, questId, request, now, forgedOutcome) => {
   const quest = state.quests.byId[questId];
-  if (!quest || quest.status !== 'draft') return state;
+  if (!quest || (quest.status !== 'draft' && quest.status !== 'offered')) return state;
 
   const membership = quest.chain;
   if (!membership) return state; // ② 单任务没有"下一步"，不适用
@@ -1733,7 +1795,12 @@ export const rerouteQuestDraft: RerouteQuestDraft = (state, questId, request, no
 
   // 前置是"这一步之前的那些步骤"，与做法无关 —— 原样继承。
   // （buildQuests 拿到的 prerequisiteTempIds 是空的：替换件的草稿里没有同批次的兄弟。）
-  const newQuest: Quest = { ...replacement, prerequisiteQuestIds: [...quest.prerequisiteQuestIds] };
+  // 状态也原样继承：buildQuests 铸出来的永远是 draft，这里把「已过审」的那半边补回去。
+  const newQuest: Quest = {
+    ...replacement,
+    prerequisiteQuestIds: [...quest.prerequisiteQuestIds],
+    ...(quest.status === 'offered' ? { status: 'offered' as const } : {}),
+  };
 
   const byId: Record<QuestId, Quest> = {
     ...state.quests.byId,
@@ -1770,9 +1837,11 @@ export const rerouteQuestDraft: RerouteQuestDraft = (state, questId, request, no
           review: {
             ...chain.review,
             rerouteCount: chain.review.rerouteCount + 1,
-            // 换法会产出一条新的 draft：审核重新变成未完成。
-            // 不重置的话，链会被记为"已审过"，而那条新草稿永远等不到它的审核。
-            reviewedAt: stillHasDraft ? null : chain.review.reviewedAt,
+            // 草稿换法会产出一条新的 draft：审核重新变成未完成。不重置的话，
+            // 链会被记为"已审过"，而那条新草稿永远等不到它的审核。
+            // 已过审的那半边（offer 换 offer）则**不动** reviewedAt ——
+            // 链上没有新增待审的东西，重开审核反而会让整条线退回待议。
+            reviewedAt: quest.status === 'draft' && stillHasDraft ? null : chain.review.reviewedAt,
           },
         },
       },

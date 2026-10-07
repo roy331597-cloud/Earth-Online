@@ -164,14 +164,14 @@ try {
   const { createMockState } = await server.ssrLoadModule('/src/store/mockState.ts');
   const {
     checkDaily, startQuest, openTurnIn, completeQuest, claimQuest, reviewQuestDraft, generateQuestChain,
-    successorOf,
+    confirmQuestChain, rejectQuestChain, successorOf,
   } = await server.ssrLoadModule('/src/store/operations.ts');
   const { mockArbiter, toTurnInInput } = await server.ssrLoadModule('/src/lib/mockArbiter.ts');
   const { localDateKey } = await server.ssrLoadModule('/src/lib/format.ts');
   // ⚠️ `networkSummary` 不在这里取 —— 它在 ⑫ 关系图谱那一段已单独解构过，
   //    同块内重复声明是语法错误。㉔ 用那边那一份即可（同一份模块实例）。
   const {
-    inProgressQuests, claimableQuests, draftQuests,
+    inProgressQuests, claimableQuests, draftQuests, chainsAwaitingReview,
     navBadges, pendingDailies, pendingWeeklies, questsByStatus,
   } = await server.ssrLoadModule('/src/lib/selectors.ts');
 
@@ -359,7 +359,11 @@ try {
 
   const fresh = createMockState();
   check('初始：q_cb_questions 是待领取', fresh.quests.byId['q_cb_questions'].status, 'offered');
-  check('初始：悬赏板上有 1 条可接', claimableQuests(fresh).map((q) => q.id), ['q_cb_questions']);
+  // 轮 C（渐进揭开）：它虽然是 offered，但前置（q_cb_docker）还在执行中 ——
+  // 于是它在悬赏板上**根本不出现**。可见性跟着前置走，不发一张灰卡：
+  // 状态机那道门（claimQuest 的前置检查）本来就在，这里只是不再先把
+  // 一件此刻做不了的事摆在玩家面前。
+  check('初始：悬赏板是空的（下一步还没被揭开）', claimableQuests(fresh).map((q) => q.id), []);
 
   // —— 前置未完成：领取必须被拒，而且是"原样返回" ——
   const blockedClaim = claimQuest(fresh, 'q_cb_questions', now);
@@ -369,6 +373,8 @@ try {
   // —— 完成前置，再领 ——
   let s2s = finish(fresh, 'q_cb_docker');
   check('前置 q_cb_docker 已结算', s2s.quests.byId['q_cb_docker'].status, 'completed');
+  // 揭开：这一步就是"每完成一步，下一步才会在板上揭开"本身
+  check('完成前置 → 下一步在板上被揭开', claimableQuests(s2s).map((q) => q.id), ['q_cb_questions']);
 
   const claimedState = claimQuest(s2s, 'q_cb_questions', now);
   check('前置满足 → offered 变 claimed', claimedState.quests.byId['q_cb_questions'].status, 'claimed');
@@ -389,7 +395,7 @@ try {
   check('不能跳过领取直接开始', startQuest(s2s, 'q_cb_questions', now), s2s);
 
   // -------------------------------------------------------------------------
-  console.log('\n【⑥ 逐条审核：通过 / 打回 / 整合链路】');
+  console.log('\n【⑥ 线级审核（轮 C）：一次确认 / 一次打回，脚下仍是逐条 resolve】');
   // -------------------------------------------------------------------------
   /**
    * 认出"由这句灵感铸出来的那条链"。
@@ -420,8 +426,8 @@ try {
   // 用 sourceIdea 认出"刚铸出来的那一批"，而不是拿 draftQuests()[0] ——
   // 后者会取到存档里本来就有的草稿（order 里排在前面），那样测的就不是铸造了
   const minted = draftQuests(s4).filter((q) => q.origin.sourceIdea === IDEA);
-  check('铸出 3 条草稿（原 1 条 + 新 3 条）', minted.length, 3);
-  check('存档里草稿总数 1 → 4', draftQuests(s4).length, draftsBefore + 3);
+  check('铸出 5 条草稿（原 1 条 + 新 5 条 —— 一条线 3~5 步，取上限）', minted.length, 5);
+  check('存档里草稿总数 1 → 6', draftQuests(s4).length, draftsBefore + 5);
   check('全部落在 draft（铸造 ≠ 生效）', minted.every((q) => q.status === 'draft'), true);
   check('未勾深度推演 → 无参谋意见', minted[0].origin.reviewed, false);
   check('未勾深度推演 → reviewerNote 为空', minted[0].origin.reviewerNote, null);
@@ -444,12 +450,18 @@ try {
     false,
   );
 
-  // 链内前置：第 1 步无前置，后两步各以前一步为前置
+  // 链内前置：第 1 步无前置，其余每一步各以前一步为前置。
+  // ⚠️ 步数不写死：链长由 MAX_DRAFTS 定（轮 C 起是 5），这里验的是**形状**
+  //    —— 连续编号、首尾相接、total 一致 —— 而不是"恰好 3 步"那个数。
   const chainQuests = newChain.questIds.map((id) => s4.quests.byId[id]);
   check('链内第 1 步无前置', chainQuests[0].prerequisiteQuestIds, []);
-  check('链内第 2 步的前置是第 1 步', chainQuests[1].prerequisiteQuestIds, [chainQuests[0].id]);
-  check('链内序号连续', chainQuests.map((q) => q.chain.index), [0, 1, 2]);
-  check('链内 total 一致', chainQuests.map((q) => q.chain.total), [3, 3, 3]);
+  check(
+    '链内每一步的前置都是它的上一步',
+    chainQuests.slice(1).map((q) => q.prerequisiteQuestIds),
+    chainQuests.slice(1).map((_, i) => [chainQuests[i].id]),
+  );
+  check('链内序号连续', chainQuests.map((q) => q.chain.index), chainQuests.map((_, i) => i));
+  check('链内 total 一致且等于步数', chainQuests.map((q) => q.chain.total), chainQuests.map(() => chainQuests.length));
   check('草稿的 id 与 tempId 不是同一个（已换成真 QuestId）', chainQuests[0].id.startsWith('q_'), true);
   check('空灵感不产生任何东西', generateQuestChain(createMockState(), { idea: '   ', deepDeliberation: false, classId: null }, now).quests.order.length, 5);
 
@@ -469,20 +481,24 @@ try {
 
   s5 = reviewQuestDraft(s5, step0.id, 'reject', now);
   check('打回 → 状态为 rejected', s5.quests.byId[step0.id].status, 'rejected');
-  check('打回 → 从链中剔除', s5.quests.chains[c5.id].questIds, [step1.id, step2.id]);
+  check('打回 → 从链中剔除', s5.quests.chains[c5.id].questIds, c5.questIds.filter((id) => id !== step0.id));
   check('打回 → 下游不再前置它（这是"不阻塞"的机制）', s5.quests.byId[step1.id].prerequisiteQuestIds, []);
   check('打回 → 序号不重排，缺口即痕迹', s5.quests.byId[step1.id].chain.index, 1);
   check('打回 → 任务本身仍在存档里（痕迹保留）', s5.quests.byId[step0.id].title, step0.title);
-  check('打回 → 链尚未审核完毕（还剩 1 条 draft）', s5.quests.chains[c5.id].review.reviewedAt, null);
+  check('打回 → 链尚未审核完毕（后面还有草稿）', s5.quests.chains[c5.id].review.reviewedAt, null);
 
   // 被摘掉前置之后，第二步真的领得动 —— 这就是"不阻塞"的可执行证据
   s5 = reviewQuestDraft(s5, step1.id, 'approve', now);
   const claimedAfterReject = claimQuest(s5, step1.id, now);
   check('打回一步之后，下一步仍然领得动', claimedAfterReject.quests.byId[step1.id].status, 'claimed');
-  check('此时链仍未审完（第 3 条还是 draft）', claimedAfterReject.quests.chains[c5.id].review.reviewedAt, null);
+  check('此时链仍未审完（后面还有草稿）', claimedAfterReject.quests.chains[c5.id].review.reviewedAt, null);
 
-  // 全部 resolve 之后 reviewedAt 才落定
-  const s6 = reviewQuestDraft(claimedAfterReject, step2.id, 'approve', now);
+  // 全部 resolve 之后 reviewedAt 才落定（轮 C 起这一串循环包在 confirmQuestChain 里，
+  // 但脚下的机械没变：仍是逐条 resolve，reviewedAt 仍要等到最后一条）
+  let s6 = claimedAfterReject;
+  for (const id of s6.quests.chains[c5.id].questIds) {
+    if (s6.quests.byId[id].status === 'draft') s6 = reviewQuestDraft(s6, id, 'approve', now);
+  }
   truthy('全部成员 resolve → reviewedAt 落定', s6.quests.chains[c5.id].review.reviewedAt);
 
   // 整条链全被打回：remaining 为空，同样视为审核结束
@@ -493,6 +509,53 @@ try {
   check('全被打回 → 链成员清空', s7.quests.chains[c7.id].questIds, []);
   truthy('全被打回 → 同样视为审核结束', s7.quests.chains[c7.id].review.reviewedAt);
   check('全被打回 → 任务都还在（作为偏好信号）', c7.questIds.every((id) => s7.quests.byId[id].status === 'rejected'), true);
+
+  // —— 轮 C · 线级裁决：一次确认 / 一次打回，落到数据上仍是逐条 resolve ——
+  //   （界面上玩家看到的是整条线：主题、理由、每一步的标题 —— 所以他做的
+  //     决定也是线级的。这两个入口就是那条 UI 的全部状态机。）
+  let s8 = createMockState();
+  s8 = generateQuestChain(s8, { idea: IDEA, deepDeliberation: false, classId: null }, now);
+  const c8 = chainFromIdea(s8, IDEA);
+
+  check(
+    '裁决前：这条线在「待议」名单里（按链计数）',
+    chainsAwaitingReview(s8).map((c) => c.id).includes(c8.id),
+    true,
+  );
+
+  const s8ok = confirmQuestChain(s8, c8.id, now);
+  check('确认这条线 → 链上每一条都变成 offered', [
+    ...new Set(c8.questIds.map((id) => s8ok.quests.byId[id].status)),
+  ], ['offered']);
+  truthy('全部成员 resolve → 链的 reviewedAt 落定', s8ok.quests.chains[c8.id].review.reviewedAt);
+  check('确认之后，悬赏板上只揭开第一步', claimableQuests(s8ok).map((q) => q.id), [c8.questIds[0]]);
+  check('未解锁的下一步先领不动（状态机那道门没因为界面而拆掉）', claimQuest(s8ok, c8.questIds[1], now) === s8ok, true);
+  check('确认不顺手替玩家领取第一步（铸造 ≠ 生效，确认也 ≠ 领取）', s8ok.quests.byId[c8.questIds[0]].status, 'offered');
+  check('确认过的线离开「待议」', chainsAwaitingReview(s8ok).some((c) => c.id === c8.id), false);
+  check('对一条已经没有草稿的线再确认 → 原对象返回（无事同对象）', confirmQuestChain(s8ok, c8.id, now) === s8ok, true);
+  check('不存在的链 → 原对象返回', confirmQuestChain(s8, 'ch_nope', now) === s8, true);
+
+  // 端到端走一遍玩家真正会走的那条路：接第一步 → 做完 → 第二步揭开
+  const s8step2 = finish(claimQuest(s8ok, c8.questIds[0], now), c8.questIds[0]);
+  check('做完第一步 → 第二步在板上被揭开', claimableQuests(s8step2).map((q) => q.id), [c8.questIds[1]]);
+  check('第二步之前的前置已结清', s8step2.quests.byId[c8.questIds[1]].prerequisiteQuestIds, [c8.questIds[0]]);
+
+  // 打回整条线：全否 + 立刻出现在「推倒重来」里（整链重抽的唯一入口）
+  let s9 = createMockState();
+  s9 = generateQuestChain(s9, { idea: IDEA, deepDeliberation: false, classId: null }, now);
+  const c9 = chainFromIdea(s9, IDEA);
+  const s9no = rejectQuestChain(s9, c9.id, now);
+  check('打回这条线 → 链上每一条都 rejected', [
+    ...new Set(c9.questIds.map((id) => s9no.quests.byId[id].status)),
+  ], ['rejected']);
+  check('打回整条线 → 链成员清空（一条都不留在线里）', s9no.quests.chains[c9.id].questIds, []);
+  truthy('打回也是"裁决完毕"：reviewedAt 落定', s9no.quests.chains[c9.id].review.reviewedAt);
+  check('打回后这条线离开「待议」', chainsAwaitingReview(s9no).some((c) => c.id === c9.id), false);
+
+  // 只碰草稿：已经生效的成员不会被一次"打回"误伤
+  const s9mixed = confirmQuestChain(s9, c9.id, now); // 先整条确认 —— 现在链上都是 offered
+  check('已确认的线再打回 → 没有草稿可打，原对象返回', rejectQuestChain(s9mixed, c9.id, now) === s9mixed, true);
+  check('那次"空打回"没有动过任何成员', s9mixed.quests.byId[c9.questIds[0]].status, 'offered');
 
   // -------------------------------------------------------------------------
   console.log('\n【⑦ 日记：结算 → 可回溯】');
@@ -1459,17 +1522,32 @@ try {
   const t0 = createMockState();
   const tIn = inHandQuests(t0).map((q) => q.id);
   check('进行中 = 已领取 + 执行中 + 待结算', tIn, ['q_cb_docker', 'q_inv_pain_audit']);
-  check('悬赏板 = 已过审、等领取', claimableQuests(t0).map((q) => q.id), ['q_cb_questions']);
-  check('待议 = 等逐条审核的草稿', draftQuests(t0).map((q) => q.id), ['q_inv_rulebook']);
-  const bucketIds = [inHandQuests(t0), claimableQuests(t0), draftQuests(t0)].flatMap((b) => b.map((q) => q.id));
-  check('三个桶互斥：没有一条任务同时在两处', new Set(bucketIds).size, bucketIds.length);
-
+  // 轮 C：板上只放"现在就能接的"。t0 的悬赏板是**空的** ——
+  // q_cb_questions 虽然是 offered，但前置（q_cb_docker）还在执行中，
+  // 它要等那一步做完才被揭开（见 ⑤ 的那一对断言）。
+  check('悬赏板 = 已过审**且**前置完成（t0 为空，下一步还没揭开）', claimableQuests(t0).map((q) => q.id), []);
+  check('待议 = 链上还有草稿（界面按链计数，数据上仍是这几条草稿）', draftQuests(t0).map((q) => q.id), ['q_inv_rulebook']);
   // 「进行中」的完整走位：执行中 → 点击完成（先进待结算）→ 结算
   const tTurn = openTurnIn(t0, 'q_cb_docker', NET_NOW);
   check('点击完成 → 先进待结算（中途刷新也不丢）', tTurn.quests.byId['q_cb_docker'].status, 'turn_in_pending');
   check('待结算也在「进行中」里（就差你确认）', inHandQuests(tTurn).map((q) => q.id).includes('q_cb_docker'), true);
   const tDone = completeQuest(tTurn, 'q_cb_docker', { reflection: '', bonusPct: 0, bonusReason: null, verdict: null }, NET_NOW);
   check('结算 → completed，离开四个桶', inHandQuests(tDone).map((q) => q.id).includes('q_cb_docker'), false);
+
+  // 互斥要拿**三个桶都有货**的那一刻去验（t0 的板子是空的，用它会白过）：
+  // 结算掉 docker 之后，板上有 q_cb_questions、手上还有 q_inv_pain_audit、
+  // 待议栏里挂着风控链 —— 三个桶各站一条。
+  const bucketIds = [inHandQuests(tDone), claimableQuests(tDone), draftQuests(tDone)].flatMap((b) => b.map((q) => q.id));
+  check(
+    '三个桶互斥：没有一条任务同时在两处',
+    [new Set(bucketIds).size, bucketIds.length],
+    [bucketIds.length, 3],
+  );
+  check(
+    '「待议」按**线**计数：风控链一条草稿 → 一个动作',
+    chainsAwaitingReview(tDone).map((c) => c.id),
+    ['ch_risk_discipline'],
+  );
 
   // 闭环：任务完成 → 关系账本上落一条（channel 记 other：它不必真的发生过"沟通"）
   const lin0 = t0.network.contacts.find((c) => c.id === 'c_lin');
@@ -1487,9 +1565,11 @@ try {
     [2, 2],
   );
 
-  // 前置换挡：桥上那条解禁之前，悬赏板上的它是灰的 —— 而且状态机上真的领不动
-  check('前置未完成 → 领取原对象返回（UI 的 disabled 只是展示，状态机自己拦）', claimQuest(t0, 'q_cb_questions', NET_NOW) === t0, true);
+  // 前置换挡：解禁之前它连板上都不出现，状态机上当然也领不动 ——
+  // 两道门（可见性与状态机）共用同一句判据，所以它们必须同时开同时关。
+  check('前置未完成 → 领取原对象返回（不是"灰按钮"，是根本没上板）', claimQuest(t0, 'q_cb_questions', NET_NOW) === t0, true);
   check('前置完成 → 同一条解禁', claimQuest(tDone, 'q_cb_questions', NET_NOW) !== tDone, true);
+  check('前置完成 → 同一条也在板上被揭开', claimableQuests(tDone).map((q) => q.id), ['q_cb_questions']);
 
   // 派生行动任务：玩家亲手写的，一步到位进「进行中」，不经过审核门控
   const der = createContactQuest(t0, 'c_zhao', { title: '  请老赵喝一次咖啡  ' }, NET_NOW);
@@ -1724,20 +1804,20 @@ try {
   check('新旧两批的 id 一个都不重合（否则新草稿会把旧痕迹原地顶掉）', rgChainAfter.questIds.some((id) => rgOldIds.includes(id)), false);
   check('归档的是"那几条旧的"，不是新来的', rgOldIds.every((id) => rgOnce.quests.archivedIds.includes(id)), true);
   check('新成员不进归档（它们正是要被展示的那一批）', rgChainAfter.questIds.some((id) => rgOnce.quests.archivedIds.includes(id)), false);
-  // 这条断言的前身是 Phase 3 留下的一条"已知局限"：当时每条职业线只有 3 条种子，
-  // 而 MAX_DRAFTS = 3 —— 替身重抽时"没出过的"是空的，只能把同一批标题原样再铸一遍。
-  // 数据上是新的一批（id 全新、旧的留档），文案上却逐字相同。
-  // Phase 4 把池子扩到 9 条之后，重抽必须**真的换一批**，所以那条"局限"升级成了断言。
+  // 池子有多深、一次取几条，一起决定了"重抽能不能真的换一批"：
+  // 目录每条线 9 条种子，而 MAX_DRAFTS 轮 C 起是 5 —— 所以第一次重抽是
+  // **4 条没出过的 + 1 条重出**（fresh 先用，不够才补旧的，见 mockForge）。
+  // 要把整链重抽也换到全 fresh，池子得 ≥ 10 条 —— 那件事列在
+  // 「种子池重标定」那一轮里（内容品味活，要 PO 一起过）。这里先把
+  // 当下真实的形状钉住：**没出过的必须全用上**，不能把手里的新货藏着。
+  const compbioPool = CLASSES.find((c) => c.classId === 'computational_biology').seedQuests.length;
+  const rerollTitles = rgChainAfter.questIds.map((id) => rgOnce.quests.byId[id].title);
   check(
-    '重抽后新一批标题与旧一批零重合（扩容要兑现的正是这一条）',
-    rgChainAfter.questIds.some((id) => rgOldTitles.includes(rgOnce.quests.byId[id].title)),
-    false,
+    '重抽：池子里还剩几条没出过的，就换几条进来',
+    rerollTitles.filter((t) => !rgOldTitles.includes(t)).length,
+    Math.max(0, compbioPool - rgOldIds.length),
   );
-  check(
-    '新一批内部也不重复',
-    new Set(rgChainAfter.questIds.map((id) => rgOnce.quests.byId[id].title)).size,
-    rgChainAfter.questIds.length,
-  );
+  check('新一批内部不重复（换进来的是几件不同的事）', new Set(rerollTitles).size, rerollTitles.length);
 
   // —— 目录：种子池的形状 ——
   // 上面那条只证明了"第一次重抽是fresh的"。池子到底有多深，得直接问目录。
@@ -1771,8 +1851,11 @@ try {
   );
 
   // 连续三轮整链重抽：每一轮都把上一轮出过的标题喂回去（regenerateQuestChain 内部
-  // 正是这么做的 —— rejectedTitles 就是上一批的标题）。9 条池子、每轮取 3 条，
-  // 三轮应当两两不重合。这是"池子深度"唯一能被机器验证的兑现方式。
+  // 正是这么做的 —— rejectedTitles 就是上一批的标题）。
+  // 9 条池子、每轮取 5 条，它跑完的形状是确定的：
+  //   第一轮 5 条全新 → 第二轮把剩的 4 条全捞上来（+1 条重出）→ 第三轮已无新货。
+  // 所以这里验的不是"两两不重合"（那要求池子 ≥ 10 条），而是
+  // **新货一条都不许剩下**：前两轮必须把 9 条全部带出来。
   const forgeRounds = [];
   let seenTitles = [];
   for (let round = 0; round < 3; round += 1) {
@@ -1786,9 +1869,14 @@ try {
     forgeRounds.push(titles);
     seenTitles = [...seenTitles, ...titles];
   }
-  check('三轮重抽共出 9 条标题，一条不重（池子真的被用起来了，不是躺在那儿）', new Set(seenTitles).size, 9);
-  check('第二轮与第一轮零重合', forgeRounds[1].some((t) => forgeRounds[0].includes(t)), false);
-  check('第三轮与前两轮零重合', forgeRounds[2].some((t) => forgeRounds[0].includes(t) || forgeRounds[1].includes(t)), false);
+  check('前两轮把池子里的 9 条标题全部带出来（新货一条不留）', new Set(seenTitles).size, compbioPool);
+  check(
+    '第二轮换进 4 条新货（池子 9 条 − 首轮 5 条），第 5 条是重出',
+    forgeRounds[1].filter((t) => !forgeRounds[0].includes(t)).length,
+    compbioPool - forgeRounds[0].length,
+  );
+  check('第三轮：池子已被用尽 → 全部是重出（替身宁可重出，也不给一条残链）',
+    forgeRounds[2].every((t) => forgeRounds[0].includes(t) || forgeRounds[1].includes(t)), true);
   check('reroute 额度随之重置（换了做法就是一条新链的审核周期）', rgChainAfter.review.rerouteCount, 0);
   check('新链的 reviewedAt 归零，等这一批重新过审', rgChainAfter.review.reviewedAt, null);
   check('玩家上一次给的整链意见被原样带进新链（它是这次重抽唯一的输入）', rgChainAfter.review.playerNote, rgChain.review.playerNote);
@@ -1807,7 +1895,7 @@ try {
   const rrStep = rr.quests.byId[rrChain.questIds[0]];
   const rrStepIdx = rrChain.questIds.indexOf(rrStep.id);
 
-  check('不是草稿 → 原对象返回（已生效的任务不能偷偷换掉）', rerouteQuestDraft(rr, 'q_cb_docker', '换一个', NET_NOW) === rr, true);
+  check('既不是草稿也不是待领取 → 原对象返回（进行中的任务不能偷偷换掉）', rerouteQuestDraft(rr, 'q_cb_docker', '换一个', NET_NOW) === rr, true);
 
   const rrNew = rerouteQuestDraft(rr, rrStep.id, '  这一步我做不动，换成先写一页  ', NET_NOW);
   const rrNewId = rrNew.quests.chains[rrChain.id].questIds[rrStepIdx];
@@ -1852,6 +1940,31 @@ try {
     rrBlank.quests.byId[rrBlankId].origin.rerouteHistory[0].request.length > 0,
     true,
   );
+
+  // —— 轮 C：换法长在**揭开之后**（offered 也能换），替换件继承原状态 ——
+  //   线还没被确认时，"这一步做不做得动"只是个假设 —— 玩家要等它上了悬赏板、
+  //   真的轮到它，才知道自己卡在哪。所以 reroute 的适用范围从 draft 放宽到
+  //   draft | offered；而**状态由新件继承**：换的是这一步的做法，不是它的进度。
+  const rrOpenBase = confirmQuestChain(rr, rrChain.id, NET_NOW);
+  check('确认整条线 → 板上只揭开第一步', claimableQuests(rrOpenBase).map((q) => q.id), [rrChain.questIds[0]]);
+
+  const rrOpen = rerouteQuestDraft(rrOpenBase, rrChain.questIds[0], '这一步排得太满了，先只写半页', NET_NOW);
+  const rrOpenIds = rrOpen.quests.chains[rrChain.id].questIds;
+  const rrOpenNew = rrOpen.quests.byId[rrOpenIds[0]];
+  check('已揭开的步骤（offered）也能换个做法', rrOpen !== rrOpenBase, true);
+  check('替换件继承原状态：offered 换出来还是 offered（不能退回未过审）', rrOpenNew.status, 'offered');
+  check('被换掉的那一步留档为 rerouted', rrOpen.quests.byId[rrChain.questIds[0]].status, 'rerouted');
+  check('下游的前置跟着改指到新件上', rrOpen.quests.byId[rrOpenIds[1]].prerequisiteQuestIds, [rrOpenNew.id]);
+  check(
+    '换法不动审核记录：链的 reviewedAt 原样（线是线，步是步）',
+    rrOpen.quests.chains[rrChain.id].review.reviewedAt,
+    rrOpenBase.quests.chains[rrChain.id].review.reviewedAt,
+  );
+  check('换过之后它仍在板上（替换件继承的是"现在就能接"这件事）', claimableQuests(rrOpen).map((q) => q.id), [rrOpenNew.id]);
+
+  // 反证：已经领到手上的那一步不许再换 —— 换法只发生在"还没动手"的时候
+  const rrHanded = claimQuest(rrOpen, rrOpenNew.id, NET_NOW);
+  check('已领取的那一步 → 原对象返回', rerouteQuestDraft(rrHanded, rrOpenNew.id, '又要换', NET_NOW) === rrHanded, true);
 
   // -------------------------------------------------------------------------
   console.log('\n【㉓ 存档：导出 → 导入的无损往返】');
@@ -1953,8 +2066,21 @@ try {
   // 就意味着"系统又在替你惦记你的关系"这件事回来了。
   check('「关系」这一格恒为 0（该联系了已撤下，系统不替玩家惦记关系）', navBadges(badgeState, P3_NOW).network, 0);
   check('「属性」报的是待分配点数', navBadges(badgeState, P3_NOW).attributes, badgeState.player.freeAttributePoints);
-  check('「悬赏」= 可接 + 待议草稿 + 待结算', navBadges(badgeState, P3_NOW).bounty,
-    claimableQuests(badgeState).length + draftQuests(badgeState).length + questsByStatus(badgeState, 'turn_in_pending').length);
+  // 轮 C：第三项从"草稿条数"换成"待议的**线**数" —— 审核是线级的，
+  // 一条线上挂着几步草稿，玩家要做的仍然只是**一个**动作（看一遍、一次裁决）。
+  // 报条数会给出一个他做不出来的数字（"待议 3"而屏幕上只有一张卡）。
+  check('「悬赏」= 可接 + 待议的线数 + 待结算', navBadges(badgeState, P3_NOW).bounty,
+    claimableQuests(badgeState).length + chainsAwaitingReview(badgeState).length + questsByStatus(badgeState, 'turn_in_pending').length);
+  // 这条口径真的不一样：铸一条 5 步的新线，草稿多 5 条，要做的动作只多 1 个
+  const badgeChained = generateQuestChain(badgeState, { idea: '想想怎么把投资纪律变成规则', deepDeliberation: false, classId: null }, P3_NOW);
+  check(
+    '同一条线上挂着几步草稿：条数会虚报，线数不会',
+    [
+      draftQuests(badgeChained).length - draftQuests(badgeState).length,
+      chainsAwaitingReview(badgeChained).length - chainsAwaitingReview(badgeState).length,
+    ],
+    [5, 1],
+  );
 
   // 无事发生 → 同一个对象形状、同样的值（纯读，绝不写盘）
   check('连读两次结果一致（selector 不读 Date.now()、不产生副作用）', JSON.stringify(navBadges(cleared, P3_NOW)), JSON.stringify(navBadges(cleared, P3_NOW)));
@@ -2220,7 +2346,7 @@ try {
   check('Mock 轨道：没有密钥也能铸出链（离线可用不是一句口号）', mockForgeRes.ok, true);
   check('Mock 轨道：来源如实标成 mock', mockForgeRes.source, 'mock');
   const mockChain = mockForgeH.state.quests.chains[mockForgeRes.data.chainId];
-  check('Mock 轨道：三步全落在 draft（铸造 ≠ 生效，这条没因为接上真身而松动）',
+  check('Mock 轨道：铸出来的每一步都落在 draft（铸造 ≠ 生效，这条没因为接上真身而松动）',
     mockChain.questIds.every((id) => mockForgeH.state.quests.byId[id].status === 'draft'), true);
 
   // Live：脚本化的真身
@@ -2262,7 +2388,7 @@ try {
   check('那一下降级被记进 corrections（它是证据，不是日志）',
     badRes.corrections.some((c) => c.includes('1 步')), true);
   check('模型的产出被替身顶掉后，来源如实标成 mock（不能谎报 api）', badRes.source, 'mock');
-  check('顶上来的是替身的三步，不是"模型那一步"',
+  check('顶上来的是替身那一整条链，不是"模型那一步"',
     badH.state.quests.chains[badRes.data.chainId].questIds.map((id) => badH.state.quests.byId[id].title).includes('真身给的第 1 步'), false);
 
   // schema 层面的硬拦：quests 里少了必填字段
@@ -2281,7 +2407,7 @@ try {
 
   // 但"包装"缺角不该毁内容：这一条是线上真遇到的 —— 回复少写了一句
   // chain.rationale（「$.chain.rationale：缺少必填字段」），整单被打回模板轨道，
-  // 而模型明明把三步内容都给了。适配器对这句话本来就有诚实的兜底（职业信条），
+  // 而模型明明把每一步的内容都给了。适配器对这句话本来就有诚实的兜底（职业信条），
   // 校验器却把它列成必填 —— 收紧在了错误的那一层。这里钉住松开之后的行为。
   const thinChainOut = liveClassOut([liveDraft(1), liveDraft(2), liveDraft(3)]);
   delete thinChainOut.chain.rationale;
@@ -2380,14 +2506,14 @@ try {
   check('tempId 撞名 → 后来者改名，三条任务是三个 id',
     [dupIds.length, new Set(dupIds).size], [3, 3]);
 
-  // 语义层的拦：模型给了 4 步
+  // 语义层的拦：模型给了一条超长的链（轮 C 起上限是 5 步）
   const fourFetch = makeFetch(
     liveDispatch('investor'),
-    liveClassOut([liveDraft(1), liveDraft(2), liveDraft(3), liveDraft(4)]),
+    liveClassOut([liveDraft(1), liveDraft(2), liveDraft(3), liveDraft(4), liveDraft(5), liveDraft(6)]),
   );
   const fourH = harness(toLive(createMockState()), { apiKey: T_KEY, fetchImpl: fourFetch });
   const fourRes = await fourH.thunks.forgeChain({ idea: LIVE_IDEA, classId: null, deepDeliberation: false });
-  check('模型给了 4 步 → 截到 3 步（一条链不该长到让人望而生畏）', fourRes.data.stepCount, 3);
+  check('模型给了 6 步 → 截到 5 步（一条线 3~5 步，多出来的不许进存档）', fourRes.data.stepCount, 5);
   check('截断这件事也留下痕迹', fourRes.corrections.some((c) => c.includes('截到')), true);
 
   // ===== 目标 id：模型自造一个 id，不该毁掉整次调用 =====
@@ -2702,7 +2828,8 @@ try {
   //
   // 靶子是自己铸的：改法只适用于 `draft` 上的链成员（rerouteQuestDraft 的第一道守卫），
   // 而演示存档自带的那两条链早就审过了。铸一条新的，靶子的形状才是我说了算的
-  // —— 三步、中间那步带后继，正好压到"必须把后继的 objective 原文带上"这条红线上。
+  // —— 链长不写死（取它的中间那一步），那一步带后继，
+  //    正好压到"必须把后继的 objective 原文带上"这条红线上。
   const RR_HOME_IDEA = '把这套做法的第二步换成一个我现在做得动的版本';
   const rrBase = generateQuestChain(
     createMockState(),

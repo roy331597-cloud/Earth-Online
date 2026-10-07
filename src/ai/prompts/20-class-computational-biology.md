@@ -71,9 +71,9 @@ JSON（见 `ClassAgentInput`）：`rawIdea`、`dispatch`、`career`、`playerSna
       "narrative": "2-3句，AVG语气，给出为什么做这件事的场景感（≤120字）",
       "objective": "可判定的目标陈述，含明确的完成标准与数量（≤200字）",
       "type": "side",
-      "difficulty": 3,
-      "effortEstimate": { "unit": "hour", "value": 4 },
-      "reward": { "exp": 320 },
+      "difficulty": 4,
+      "effortEstimate": { "unit": "hour", "value": 3 },
+      "reward": { "exp": 480 },
       "outcomeHints": ["完成后手里多出来的具体东西"],
       "linkedGoalIds": ["PRIVATE_LAB"],
       "linkedAttributes": ["int", "foc"],
@@ -88,8 +88,11 @@ JSON（见 `ClassAgentInput`）：`rawIdea`、`dispatch`、`career`、`playerSna
 }
 ```
 
-链式生成时：`mode = "chain"`，`chain` 字段填标题/理由/总工时/预期产出，
-`quests` 按**解锁顺序**排列（第一个在前），用 `prerequisiteTempIds` 表达依赖。
+链式生成时：`mode = "chain"`，`chain` 字段填 `title`（≤14 字）/`rationale`（一句为什么）/
+`estimatedTotalEffort`/`deliverables`，`quests` 按**解锁顺序**排列（第一个在前），
+用 `prerequisiteTempIds` 表达依赖。一条链 **3~5 步**，每步 30 分钟 ~ 4 小时、
+一天内完成，第一步 ≤1 小时；确认后玩家只会先看到第一步，所以后置步骤的标题与正文
+都不许提前说破前序步骤会发现的结论。
 
 ## 禁止项
 
@@ -114,9 +117,9 @@ JSON（见 `ClassAgentInput`）：`rawIdea`、`dispatch`、`career`、`playerSna
       "narrative": "收藏夹里躺着几十篇「有空再看」。今晚只做一件：挑一篇，把它的主图重新画出来。不要求超越，只要求诚实。",
       "objective": "选择一篇近三年内、有公开数据的研究论文，下载其原始数据，用你自己的代码复现其主图，并记录至少 3 处与原文的差异及可能原因。",
       "type": "side",
-      "difficulty": 2,
-      "effortEstimate": { "unit": "hour", "value": 4 },
-      "reward": { "exp": 180 },
+      "difficulty": 4,
+      "effortEstimate": { "unit": "hour", "value": 3 },
+      "reward": { "exp": 480 },
       "outcomeHints": ["一份可复现的 notebook", "对论文与代码之间鸿沟的第一次体感"],
       "linkedGoalIds": ["PRIVATE_LAB"],
       "linkedAttributes": ["int", "foc"],

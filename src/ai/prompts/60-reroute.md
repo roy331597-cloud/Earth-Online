@@ -77,7 +77,7 @@
 
 ## 工作量
 
-`effortEstimate` 要跟着缩水。一个降了两档的任务，不该还标着 8 小时。
+`effortEstimate` 要跟着缩水。一个降了两档的任务，不该还标着 4 小时。
 但它有地板：**不要给 30 分钟以下的估算** —— 一件没有重量的事不配叫任务。
 
 ## 禁止项
@@ -97,9 +97,9 @@
   "quest": {
     "title": "跑通 Fasta 解析并统计碱基组成",
     "objective": "用 Biopython 解析 20 条序列，输出 GC 含量表，写进 notebook",
-    "difficulty": 3,
+    "difficulty": 4,
     "effortEstimate": { "unit": "hour", "value": 4 },
-    "reward": { "exp": 120 },
+    "reward": { "exp": 480 },
     "tags": ["bioinformatics", "python"]
   },
   "request": "这一步我做不动，装环境就卡住了两天。",
@@ -122,9 +122,9 @@
   "narrative": "你把两天花在了装环境上，那说明这一步原本的规模就不对。环境先别追求完备：用最省事的方式让 20 行序列进来一次，你才知道后面真正卡在哪。「装不上」本身就是一个值得记下来的发现，不算失败。",
   "objective": "任选一种方式（在线工具、笔记本自带的包、别人写好的脚本都算），把 20 行序列读到内存里并打印出总条数与平均长度，把过程和结果写进 notebook。做完这一版，你就能接着往下走 —— 下一步是「用上一步的 GC 含量表画一张分布图，说明你看到的偏差」。",
   "type": "side",
-  "difficulty": 1,
+  "difficulty": 2,
   "effortEstimate": { "unit": "hour", "value": 1 },
-  "reward": { "exp": 45 },
+  "reward": { "exp": 170 },
   "outcomeHints": ["一段能跑的读取代码", "一次真实的运行记录"],
   "linkedGoalIds": [],
   "linkedAttributes": ["int"],

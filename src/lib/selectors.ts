@@ -46,6 +46,7 @@ import type {
   NetworkGraphSummary,
   NodeId,
   Quest,
+  QuestChain,
   QuestId,
   RealityMilestoneCategory,
   RealityMilestoneRecord,
@@ -187,17 +188,50 @@ export const inHandQuests = (state: EarthOnlineState): Quest[] =>
     .map((id) => state.quests.byId[id])
     .filter((q): q is Quest => Boolean(q) && IN_HAND.includes(q.status));
 
-/** 已审核通过、等玩家点「领取」的任务 */
+/**
+ * 链上一个任务的前置是否都完成了。
+ *
+ * 与 `operations.prerequisitesMet` 是同一句话 —— 那份是状态机的门槛，
+ * 这份是派生量的口径，两个文件各留一份是刻意的：
+ * lib 不反向依赖 store（依赖链单向，才不会绕成环）。
+ * 改这里的判据之前，先去 operations.ts 把那一份一起看了。
+ */
+const prereqsMet = (state: EarthOnlineState, quest: Quest): boolean =>
+  quest.prerequisiteQuestIds.every((id) => state.quests.byId[id]?.status === 'completed');
+
+/**
+ * 现在就能领取的任务：**已过审，且前置全部完成**。
+ *
+ * 轮 C（渐进揭开）：确认一条线之后，只有第一步会被揭开 —— 后面几步
+ * 虽然同样是 offered，但前置（上一步）还没完成，它们**在悬赏板上根本不出现**，
+ * 不是灰卡、不是"未解锁"的占位。这不是新门槛，而是把 claimQuest 上
+ * 一直就有的前置门控（契约见 types/state.ts 的 ClaimQuest 注释）
+ * 前移到**可见性**层面：状态机拦不住的东西，界面也不该先展示出来。
+ *
+ * 于是"数字"与"能做的事"仍然一一对应：悬赏板上数出来的每一条，现在就能接。
+ */
 export const claimableQuests = (state: EarthOnlineState): Quest[] =>
   state.quests.order
     .map((id) => state.quests.byId[id])
-    .filter((q): q is Quest => Boolean(q) && q.status === 'offered');
+    .filter((q): q is Quest => Boolean(q) && q.status === 'offered' && prereqsMet(state, q));
 
 /** 等玩家逐条审核的草稿 */
 export const draftQuests = (state: EarthOnlineState): Quest[] =>
   state.quests.order
     .map((id) => state.quests.byId[id])
     .filter((q): q is Quest => Boolean(q) && q.status === 'draft');
+
+/**
+ * 等玩家做**线级裁决**的链：链内还有至少一条 draft。
+ *
+ * 轮 C 起审核的主入口是线级的（confirmQuestChain / rejectQuestChain），
+ * 界面上它算"一个动作"—— 看整条线，一次确认或打回 ——
+ * 所以角标按**链**计数，而不是按草稿条数。
+ */
+export const chainsAwaitingReview = (state: EarthOnlineState): QuestChain[] =>
+  Object.values(state.quests.chains).filter((chain) =>
+    chain.questIds.some((id) => state.quests.byId[id]?.status === 'draft'),
+  );
 
 export const todayKey = (now: Date): DateKey => localDateKey(now);
 
@@ -261,7 +295,9 @@ export const pendingWeeklies = (state: EarthOnlineState, now: Date) => {
 export const navBadges = (state: EarthOnlineState, now: Date) => ({
   bounty:
     claimableQuests(state).length +
-    draftQuests(state).length +
+    // 审核在轮 C 变成线级动作：一条线算**一个**动作（看一遍整条线，一次确认），
+    // 而不是链里有几条草稿就算几个 —— 后者会报出一个玩家做不了的数字
+    chainsAwaitingReview(state).length +
     questsByStatus(state, 'turn_in_pending').length,
   // 合并计数：一块面板，一个入口，就该只有一个数字
   dailies: pendingDailies(state, now).length + pendingWeeklies(state, now).length,

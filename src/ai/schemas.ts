@@ -189,7 +189,8 @@ const dispatcherDecisionSchema: JsonSchema = {
       type: 'object',
       properties: {
         kind: { type: 'string', enum: ['single', 'chain'] },
-        suggestedChainLength: { ...{ type: 'integer', minimum: 3, maximum: 7 }, nullable: true },
+        // 轮 C 口径：一条线 3~5 步。越界由 validate 的 clamp 记 corrections 收拢（不失败）
+        suggestedChainLength: { ...{ type: 'integer', minimum: 3, maximum: 5 }, nullable: true },
         suggestedType: { type: 'string', enum: QUEST_TYPES },
       },
       required: ['kind', 'suggestedChainLength', 'suggestedType'],

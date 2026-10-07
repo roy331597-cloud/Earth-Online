@@ -78,8 +78,8 @@ export interface Adapted<T> {
   corrections: string[];
 }
 
-/** 一条链的任务数上限。与 mockForge 的 MAX_DRAFTS 同一个产品口径 */
-const MAX_DRAFTS = 3;
+/** 一条链的任务数上限。与 mockForge 的 MAX_DRAFTS 同一个产品口径（轮 C：3~5 步） */
+const MAX_DRAFTS = 5;
 const MIN_DRAFTS = 2;
 
 /** 合法的里程碑标签（44 条封闭词表）。模型自创的标签一律拦在这里 */

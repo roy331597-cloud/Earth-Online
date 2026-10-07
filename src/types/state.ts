@@ -9,7 +9,7 @@
 //   3) 写入前统一走 pruneUndefined()，避免 JSON.stringify 丢字段造成 Schema 漂移。
 // ============================================================================
 
-import type { AppSettings, CareerPortfolio, DateKey, DomainEvent, ISODateTime, Player, Vault } from './core';
+import type { AppSettings, CareerPortfolio, ChainId, DateKey, DomainEvent, ISODateTime, Player, Vault } from './core';
 import type { DailyState, QuestState, WeeklyState } from './quest';
 import type { JournalState } from './journal';
 import type { MilestoneSnapshot, MilestonesState } from './milestones';
@@ -133,20 +133,46 @@ export type RunDailyRollover = (state: EarthOnlineState, now: Date) => {
 
 /**
  * 领取任务：offered -> claimed。
- * draft 任务必须先经过**逐条审核**（ReviewQuestDraft）——
- * 链式与单任务走同一个入口；
+ * draft 任务必须先经过**线级确认**（ConfirmQuestChain）——链式与单任务走同一个入口；
  * 若存在未完成的 prerequisiteQuestIds，返回原状态并附拒绝原因（Phase 3 契约）。
+ *
+ * ⚠️ 轮 C（PO 裁定「做完一步才揭开下一步」）之后，前置未完成的任务
+ *    在悬赏板上**根本不出现**（见 selectors.claimableQuests）；
+ *    但这里那道门槛不撤 —— UI 的可见性是展示，状态机不该依赖它。
  */
 export type ClaimQuest = (state: EarthOnlineState, questId: string, now: Date) => EarthOnlineState;
 
 /**
- * 逐条审核一个任务草稿（链式与单任务统一入口）。
+ * 确认整条线：链内全部 draft 一次转为 offered —— 审核的主入口。
  *
- * 审核面板会列出整条系列的全部任务，玩家逐个 resolve：
+ * 轮 C（PO 裁定）把审核从"逐条通过"改成了**线级一次裁决**：
+ * 玩家在「待议」看到的不是一串孤立的卡片，而是这条线要去哪 ——
+ * 主题、理由、每一步的标题；点「确认这条线」之后整条线一起过审，
+ * 但**只有第一步会出现在悬赏板上**，后面的步骤要等前一步完成才逐步揭开。
+ *
+ * 确认后链的 `review.reviewedAt` 落定（内部逐条走 ReviewQuestDraft，
+ * 最后一条 resolve 时自动落定 —— 那条规则只有一处实现）。
+ */
+export type ConfirmQuestChain = (state: EarthOnlineState, chainId: ChainId, now: Date) => EarthOnlineState;
+
+/**
+ * 打回整条线：链内全部 draft 一次转为 rejected（与逐条打回同一套摘链机制：
+ * 成员从 questIds 摘除、下游对它的前置解开、痕迹保留作偏好信号）。
+ *
+ * 全部成员 rejected 之后，这条链就出现在「整链重抽」的名单上
+ * （chainsAwaitingRegeneration），额度与二次确认在那边。
+ */
+export type RejectQuestChain = (state: EarthOnlineState, chainId: ChainId, now: Date) => EarthOnlineState;
+
+/**
+ * 逐条审核一个任务草稿 —— **线级动作（ConfirmQuestChain / RejectQuestChain）的底层机械**。
+ *
+ * 它仍然存在、仍然只留两态，因为"一条线"在地板上就是"逐条 resolve"：
  *   - 'approve'：draft -> offered，随后由玩家自行「领取」；
  *   - 'reject' ：draft -> rejected，从链中剔除——保留痕迹作为 AI 的偏好信号，
  *                且**不阻塞**同链其它任务的推进。
  * 全部成员 resolve 后，链的 `review.reviewedAt` 落定。
+ * 单条任务（1 步的链）的确认走的也是这条路，没有特权路径。
  *
  * ⚠️ 这个联合**有意只留两态**，第三个动作不往这里塞。
  *
@@ -181,8 +207,10 @@ export type ReviewQuestDraft = (
  *   ② 新形态**必带后继任务的 objective 原文**：改法的合法性判据是"它还通得向下一步"。
  *      把这一步换成与后继无关的事，等于把链悄悄改道了，而那不归这一步管。
  *
- * 状态流转：旧任务 `draft -> rerouted`（留在 byId 里留档），
- * 新任务以同样的 chain 归属、同样的 index 落回 `draft` —— 它仍要过一次审核。
+ * 状态流转：旧任务 `draft/offered -> rerouted`（留在 byId 里留档），
+ * 新任务以同样的 chain 归属、同样的 index **继承原状态**落回 ——
+ * 草稿换出草稿（仍要过一次线级确认），已过审的换出已过审（玩家是在往下走的
+ * 路上卡住的，不是在过审的时候 —— 轮 C：确认之后「换个做法」才真正有用武之地）。
  * 额度：链级软上限 REROUTE_CHAIN_LIMIT（2 次），记在 ChainReview.rerouteCount 上。
  *
  * ⚠️ Phase 3 走 mockReroute 替身（与 GenerateQuestChain 走 mockForge 同一手法）；
@@ -217,7 +245,7 @@ export type StartQuest = (state: EarthOnlineState, questId: string, now: Date) =
  *
  * 这是**非日常任务唯一的入口**：玩家写下想推进的事，Dispatcher 选择职业线，
  * 对应 Class Agent 产出整条链的草稿。产出全部落在 `draft` 状态上 ——
- * 铸造本身不发奖、不进背包、不影响任何进度，必须再经 `ReviewQuestDraft` 逐条过目。
+ * 铸造本身不发奖、不进背包、不影响任何进度，必须再经 `ConfirmQuestChain` 确认整条线。
  *
  * `deepDeliberation` 对应界面上的「深度推演」复选框：勾选时走 Agent A 生成
  * + Agent B 审核的两段式，审核意见落进每条任务的 `origin.reviewerNote`
@@ -490,11 +518,12 @@ export type AskNetworkAdvisor = (
 ) => EarthOnlineState;
 
 /**
- * 整链重生成：仅在**整条链的任务都被逐条打回**后可调用
+ * 整链重生成：仅在**整条链都被打回**后可调用
  * （review.regenerationCount 上限 1 次，防止无限抽卡）。
  * 带 `playerNote` 重新生成整链草稿（回到 draft）。
  *
- * 注意：逐条打回个别任务**不消耗**这个额度——它是"整条链方向都不对"时的一次重来。
+ * 注意：轮 C 之后打回的主要入口就是线级的「打回重来」（RejectQuestChain）；
+ * 无论怎么打回，只有**全部成员都被否**才配得上这一次重来。
  */
 export type RegenerateQuestChain = (
   state: EarthOnlineState,
