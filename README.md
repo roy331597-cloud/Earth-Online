@@ -28,7 +28,8 @@ npm run verify:ops  # 不变量断言全集（改引擎 / 内容目录后必跑�
 `.env` 就自动 HTTPS。服务器上装不了 Docker 时可用备选路径（Node + nginx，
 配置见 [`deploy/nginx-bare.conf`](deploy/nginx-bare.conf)）。
 
-带 HTTPS 的域名是"装进手机"的硬前提 —— iOS 与 Android 都把安装限定在安全上下文里。
+带 HTTPS 的地址（域名，或部署文档里说的免费名字）是"装进手机"的硬前提 ——
+iOS 与 Android 都把安装限定在安全上下文里。
 
 ## 目录一览
 

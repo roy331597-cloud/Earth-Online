@@ -4395,6 +4395,10 @@ try {
     readme.includes('云同步') && readme.includes('口令加密') && readme.includes('密文'));
   truthy('部署文档：升级步骤含 caddy 重启（Caddy 只在启动时读一次配置，挂载件变了它不知道）',
     deploy.includes('docker compose restart caddy'));
+  truthy('部署文档：免费名字两条路在场（sslip.io 零注册 / DuckDNS）—— 不买域名也能拿到 HTTPS',
+    deploy.includes('sslip.io') && deploy.includes('DuckDNS'));
+  truthy('部署文档：换名字 = 换门牌（浏览器存储按地址隔离，云同步兜底迁移）',
+    deploy.includes('换名字 = 换门牌') && deploy.includes('按地址隔离'));
 
   // —— ⑫ IP 守门：仓库里不许出现真实的 IP 字面量 ——
   // 对话与记忆里可以记它，仓库不行 —— 文档是给人看、也可能给搜索引擎读的。
