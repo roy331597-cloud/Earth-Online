@@ -337,7 +337,7 @@ export const fetchSave = async (
   return {
     wire: text,
     revision: revision !== null && Number.isFinite(revision) ? revision : null,
-    updatedAt: res.value.headers.get('x-save-updated-at'),
+    updatedAt: res.value.headers.get('X-Save-UpdatedAt'),
     size: text.length,
   };
 };
@@ -377,7 +377,7 @@ export const probeSave = async (
   return {
     ok: true,
     revision: revision !== null && Number.isFinite(revision) ? revision : null,
-    updatedAt: res.value.headers.get('x-save-updated-at'),
+    updatedAt: res.value.headers.get('X-Save-UpdatedAt'),
     size: sizeHeader !== null && sizeHeader.length > 0 ? Number(sizeHeader) : null,
   };
 };

@@ -19,7 +19,7 @@
 //   ㉘ 成就引擎（命名、补发、只增不减、雾里不点名）
 //   ㉙ 进化树引擎（点亮、回填、掀雾、统计）
 //   ㉚ 终局目标引擎（点亮、重算、圣殿视图）
-//   ㉛ 出厂封装（PWA 清单 / iOS meta / Docker / nginx / compose + Caddy / README / 裸机配置）
+//   ㉛ 出厂封装（PWA 清单 / iOS meta / Docker / nginx / compose + Caddy / README / 裸机配置 / 云同步封装 / IP 守门）
 //   ㉜ 出厂清场（空档：结构完整 / 引用隔离 / 全空清单 / 漏斗空转两遍）
 //   ㉝ 手写每日（第二支笔：写下来 / 惩罚定格 / 拒绝路径）
 //   ㉞ 手写任务（直接进「进行中」）  ㉟ 出题处方（两份素材、雾不外泄）
@@ -153,23 +153,30 @@
 //         吞掉 409 就是静默覆盖别人的进度，吞掉 401 就是拿着废 token 一直重试。
 //      ㊳ 端到端 —— 用 `node server/index.mjs` 起**真的那台服务器**（临时数据目录），
 //         让真客户端协议与之对穿。它守的是"客户端与服务器各写各的、悄悄漂移"：
-//         verifier 的算法、base64url 的形态、If-Match 的语义 —— 漂了以后的
-//         症状是"口令明明对却一直 401"，在真机上极难定位，所以要在交付前大声地失败。
+//         verifier 的算法（对解码字节、不是对文本取摘要）、请求头名的逐字符拼写、
+//         If-Match 的语义、413 的送达 —— 漂了以后的症状是"口令明明对却一直 401"
+//         或"体积超限只说网络错误"，在真机上极难定位，所以要在交付前大声地失败。
+//         它第一次跑就抓到了前两处（见 syncCrypto.ts 与 index.mjs 里的注释）。
 //
 // 还有一条只有这条脚本能钉住的东西：**纯函数的拒绝路径必须原对象返回**。
 // 全项目所有 operation 都遵守这条自律（见 operations.ts），而它一旦破掉，
 // 症状是"点一下没反应但存档被写了一次"—— 没有任何单点能看出来。
 // ============================================================================
 
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { tmpdir } from 'node:os';
+import { spawn } from 'node:child_process';
 import { createServer } from 'vite';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const server = await createServer({ server: { middlewareMode: true }, appType: 'custom', logLevel: 'error' });
 
 let failed = 0;
+/** ㊳ 起的真同步服务器进程与临时数据目录：异常路径也不许留孤儿（否则闸门会挂住） */
+const spawnedChildren = [];
+let spawnedSyncDir = null;
 const check = (label, actual, expected) => {
   const ok = JSON.stringify(actual) === JSON.stringify(expected);
   if (!ok) failed += 1;
@@ -4287,8 +4294,8 @@ try {
   // —— ⑦ compose 与构建上下文（一条命令栈：应用 + Caddy） ——
   const compose = readText('docker-compose.yml');
   const caddyfile = readText('deploy/Caddyfile');
-  truthy('一条命令起整个栈：应用 + Caddy 两个服务',
-    /^\s{2}earthonline:/m.test(compose) && /^\s{2}caddy:/m.test(compose));
+  truthy('一条命令起整个栈：应用 + 同步 + Caddy 三个服务',
+    /^\s{2}earthonline:/m.test(compose) && /^\s{2}sync:/m.test(compose) && /^\s{2}caddy:/m.test(compose));
   truthy('Caddy 是唯一对外的面：80 与 443',
     compose.includes('"80:80"') && compose.includes('"443:443"'));
   truthy('应用端口不再捅到宿主机（对外只有一个入口，少一条解释不清的路径）',
@@ -4299,8 +4306,8 @@ try {
   truthy('Caddyfile 挂进容器，反代目标是内网服务名',
     compose.includes('./deploy/Caddyfile:/etc/caddy/Caddyfile') &&
       caddyfile.includes('reverse_proxy earthonline:80'));
-  truthy('restart: unless-stopped 两个服务都在（服务器重启后自己回来）',
-    (compose.match(/restart: unless-stopped/g) ?? []).length >= 2);
+  truthy('restart: unless-stopped 三个服务都在（服务器重启后自己回来）',
+    (compose.match(/restart: unless-stopped/g) ?? []).length >= 3);
   truthy('caddy 等应用体检通过再起（首启不撞空上游）',
     compose.includes('condition: service_healthy'));
   truthy('node_modules 不进构建上下文（宿主机依赖盖掉 npm ci = 经典翻车）',
@@ -4339,6 +4346,82 @@ try {
     !bareCode.includes('Permissions-Policy:'));
   truthy('部署文档：无 Docker 路径在场（裸机配置 + certbot）',
     deploy.includes('deploy/nginx-bare.conf') && deploy.includes('certbot'));
+
+  // —— ⑩ 云同步：第三只容器、/sync/* 的两处分流、零依赖的服务端 ——
+  // ㊳ 在真磁盘上验了服务端的行为；这里验的是**封装**：镜像怎么搭、
+  // 编排怎么接、两套反代（Caddy / 裸机 nginx）各自怎么把 /sync/* 送进去。
+  const serverDockerfile = readText('server.Dockerfile');
+  check('同步镜像：单阶段（零依赖，没有构建期可言）',
+    (serverDockerfile.match(/^FROM /gm) ?? []).length, 1);
+  truthy('基座 node:22-alpine（与开发机、与应用构建层同大版本）',
+    serverDockerfile.includes('FROM node:22-alpine'));
+  const serverDockerCode = serverDockerfile.split('\n').filter((l) => !l.trim().startsWith('#')).join('\n');
+  truthy('镜像里不跑任何包管理（server/ 是零依赖的 .mjs）',
+    !/npm|yarn|pnpm/.test(serverDockerCode));
+  truthy('只有 server/ 进镜像（前端源码与存档都不该在里面）',
+    serverDockerCode.includes('COPY server/ ./server/'));
+  truthy('带健康检查（compose 里 depends_on: service_healthy 问的就是它）',
+    serverDockerCode.includes('HEALTHCHECK'));
+  const serverFiles = readdirSync(join(root, 'server')).sort();
+  check('server/ 里只有那两个 .mjs —— 没有 package.json / node_modules 可漂',
+    serverFiles, ['index.mjs', 'store.mjs']);
+  truthy('compose：第三个服务 sync 由 server.Dockerfile 构建',
+    compose.includes('dockerfile: server.Dockerfile'));
+  const composeCode = compose.split('\n').filter((l) => !l.trim().startsWith('#')).join('\n');
+  truthy('同步容器不对宿主机开端口（对外仍然只有 Caddy 一个面）',
+    !composeCode.includes('3000:3000'));
+  truthy('sync_data 卷声明在场（认领与密文都在那里，重建容器不碰它）',
+    /^\s{2}sync_data:$/m.test(composeCode));
+  truthy('caddy 也等同步服务体检通过（/sync/* 的上游也必须是活的）',
+    /^\s{6}sync:\s*\n\s{8}condition: service_healthy/m.test(composeCode));
+  truthy('Caddyfile：/sync/* 分流给同步容器，前缀不剥（服务器路由字面一致）',
+    caddyfile.includes('handle /sync/*') && caddyfile.includes('reverse_proxy sync:3000'));
+  truthy('Caddyfile：兜底块写在分流之后（handle 互斥、按书写次序判定）',
+    caddyfile.indexOf('handle /sync/*') < caddyfile.indexOf('reverse_proxy earthonline:80'));
+  truthy('裸机配置：/sync/ 转发给本机的同步服务（前缀不剥：proxy_pass 不带 URI）',
+    bareCode.includes('location /sync/') && bareCode.includes('proxy_pass http://127.0.0.1:3000;'));
+  truthy('容器版 nginx.conf **故意没有** /sync/（Docker 路径由 Caddy 先截走，两处都配会绕圈）',
+    !nginxCode.includes('/sync/'));
+
+  // —— ⑪ 文档：域名怎么买 + 云同步两节在场 ——
+  truthy('部署文档：域名怎么买（两家注册商 + A 记录 + dig 验证 + 续费提醒）',
+    deploy.includes('Porkbun') && deploy.includes('Namecheap') &&
+      deploy.includes('A 记录') && deploy.includes('dig +short') && deploy.includes('续费'));
+  truthy('部署文档：云同步一节（第三只容器 / 口令丢了怎么办 / 清卷命令 / 裸机进程）',
+    deploy.includes('云同步') && deploy.includes('sync_data') &&
+      deploy.includes('口令丢了') && deploy.includes('docker volume rm') &&
+      deploy.includes('server/index.mjs'));
+  truthy('README：说了云同步（可选、口令加密、服务器只存密文）',
+    readme.includes('云同步') && readme.includes('口令加密') && readme.includes('密文'));
+
+  // —— ⑫ IP 守门：仓库里不许出现真实的 IP 字面量 ——
+  // 对话与记忆里可以记它，仓库不行 —— 文档是给人看、也可能给搜索引擎读的。
+  // 例外只有两类：回环（配置里正当的本机地址）与 RFC 5737 的文档专用段
+  // （203.0.113.x / 192.0.2.x / 198.51.100.x —— 文档举例就该用它们）。
+  // 扫的是"可能写地址的文本文件"：文档、配置、脚本、清单。
+  // 源码 .tsx 不扫：SVG 路径数据里偶然冒出 x.y.z.w 是噪音，不是地址（已核实过一次）。
+  const IP_RE = /\b\d{1,3}(?:\.\d{1,3}){3}\b/g;
+  const IP_ALLOWED = /^(?:127\.0\.0\.1|0\.0\.0\.0|203\.0\.113\.\d{1,3}|192\.0\.2\.\d{1,3}|198\.51\.100\.\d{1,3})$/;
+  const IP_TEXT_EXT = ['.md', '.mjs', '.js', '.json', '.yml', '.yaml', '.conf', '.txt', '.webmanifest'];
+  const IP_TEXT_FILE = ['Dockerfile', 'server.Dockerfile', 'Caddyfile', 'nginx.conf', '.env.example', '.gitignore', '.dockerignore'];
+  const IP_SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', '.backup', '.tmp', '.claude']);
+  const ipViolations = [];
+  const scanForIps = (dir, rel) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (!IP_SKIP_DIRS.has(entry.name)) scanForIps(join(dir, entry.name), `${rel}${entry.name}/`);
+        continue;
+      }
+      const name = entry.name;
+      if (!IP_TEXT_EXT.some((e) => name.endsWith(e)) && !IP_TEXT_FILE.includes(name)) continue;
+      const text = readFileSync(join(dir, name), 'utf8');
+      for (const ip of text.match(IP_RE) ?? []) {
+        if (!IP_ALLOWED.test(ip)) ipViolations.push(`${rel}${name}: ${ip}`);
+      }
+    }
+  };
+  scanForIps(root, '');
+  check('全仓库没有真实 IP 字面量（只许回环与 RFC 5737 文档段）', ipViolations, []);
 
   // -------------------------------------------------------------------------
   console.log('\n【㉜ 出厂清场：空档（生产初始档）】');
@@ -4751,7 +4834,7 @@ try {
   console.log('\n【㊲ 云同步 · 协议流程：假服务器把整条路走穿】');
   // -------------------------------------------------------------------------
   const {
-    fetchMeta, claimServer, probeSave, deleteSave,
+    fetchMeta, claimServer, probeSave, fetchSave, pushSave, deleteSave,
     syncEnableFlow, syncPushFlow, syncPullFlow, syncRotatePassphraseFlow, SYNC_BASE_PATH,
   } = await server.ssrLoadModule('/src/lib/syncClient.ts');
 
@@ -4821,7 +4904,7 @@ try {
           if (blob === null) return reply(404, JSON.stringify({ error: 'empty' }));
           const headers = {
             'x-save-revision': String(revision),
-            'x-save-updated-at': updatedAt ?? '',
+            'x-save-updatedat': updatedAt ?? '',
             'content-length': String(blob.length),
           };
           return reply(200, init.method === 'GET' ? blob : '', headers);
@@ -5081,10 +5164,235 @@ try {
   const reopened = await openEnvelope(retried.keys.key, srvHalf.snapshot().blob);
   check('收敛后的云端密文归重试那一把新钥管', reopened.saveJson, JSON.stringify(envState));
 
+  // -------------------------------------------------------------------------
+  console.log('\n【㊳ 云同步 · 真服务器：同一套客户端协议对着一台真的 node server/index.mjs 走穿】');
+  // -------------------------------------------------------------------------
+  // ㊲ 对着**假服务器**走合同；这一节把仓库里那个真文件跑起来，用同一套客户端
+  // 协议对穿。它守的是㊲守不到的几样，也只有真进程 + 真磁盘能给答案：
+  //   · 请求头的**逐字符拼写**（㊲ 的假服务器对头名大小写不敏感，真 HTTP 会把
+  //     'X-Save-UpdatedAt' 与 'X-Save-Updated-At' 当成两个头 —— 本节第一次跑
+  //     就抓到了这个漂移，还有 verifier 对"解码字节"还是"文本"取摘要那处）；
+  //   · 路由字面量与 SYNC_BASE_PATH 逐字符咬合（差一个斜杠现在就 404）；
+  //   · 落盘：save.bin / save.prev.bin / state.json 真在磁盘上，且没有半途残件；
+  //   · 413 在请求头上就拦下（21MB 的体不给它把内存吃进去的机会）；
+  //   · 重启（进程杀掉、同一份目录重开）之后认领、钥匙、密文都还在。
+  // 跑法：临时目录 + SYNC_PORT=0（让内核挑端口，不跟机器上别的进程抢 3000），
+  // 端口从服务器 stdout 那行机器可读的 SYNC_LISTENING 里读。
+  const syncDataDir = mkdtempSync(join(tmpdir(), 'eo-sync-verify-'));
+  spawnedSyncDir = syncDataDir;
+
+  const startRealSync = () =>
+    new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [join(root, 'server', 'index.mjs')], {
+        cwd: root,
+        env: { ...process.env, SYNC_DATA_DIR: syncDataDir, SYNC_PORT: '0' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { child.kill(); } catch { /* 已经走了 */ }
+        reject(new Error(`同步服务器 10 秒内没报端口。stderr：${stderr}`));
+      }, 10_000);
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk.toString('utf8');
+        const m = stdout.match(/SYNC_LISTENING port=(\d+)/);
+        if (m !== null && !settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve({ child, port: Number(m[1]), logs: () => stdout, errLogs: () => stderr });
+        }
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk.toString('utf8');
+      });
+      child.on('error', (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(err);
+      });
+      child.on('exit', (code) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(new Error(`同步服务器提前退出（code=${code}）。stderr：${stderr}`));
+      });
+    });
+
+  const stopRealSync = (s) =>
+    new Promise((resolve) => {
+      if (s.child.exitCode !== null || s.child.signalCode !== null) {
+        resolve();
+        return;
+      }
+      s.child.once('exit', () => resolve());
+      try {
+        s.child.kill('SIGTERM');
+      } catch {
+        resolve();
+      }
+      // 顽固不退就强杀 —— 闸门不许挂在一个子进程上
+      setTimeout(() => {
+        try { s.child.kill('SIGKILL'); } catch { /* 已经走了 */ }
+        resolve();
+      }, 3000).unref();
+    });
+
+  const real = await startRealSync();
+  spawnedChildren.push(real.child);
+  const rbase = `http://127.0.0.1:${real.port}`;
+  const rdeps = { fetch: globalThis.fetch, now: () => SYNC_NOW };
+  truthy('真服务器起来了（端口是从它自己的 SYNC_LISTENING 行里读的）', real.port > 0);
+
+  const health = await (await globalThis.fetch(`${rbase}/sync/v1/health`)).json();
+  check('health：答的是 { ok: true }（容器 HEALTHCHECK 问的就是这一句）', health, { ok: true });
+  const healthRetry = await globalThis.fetch(`${rbase}${SYNC_BASE_PATH}/meta`);
+  truthy('meta 无鉴权也能问（第二台设备接入的第一步：先问服务器有没有主）', healthRetry.status === 200);
+
+  const rmeta0 = await fetchMeta(rdeps, rbase);
+  check('meta：全新目录 = 未认领、无盐、无修订',
+    [rmeta0.claimed, rmeta0.salt, rmeta0.revision], [false, null, null]);
+  check('meta：上限与服务器写死的一个数（客户端先量后传的依据）', rmeta0.maxBytes, 20 * 1024 * 1024);
+
+  // —— 认领 ——
+  const realSalt = randomSalt();
+  const realKeys = await deriveKeyMaterial(SYNC_PASS, realSalt);
+  const claim1 = await claimServer(rdeps, { salt: realSalt, verifier: realKeys.verifier }, rbase);
+  check('首次认领 → 201', [claim1.ok, claim1.status, claim1.replaced], [true, 201, false]);
+  const claimDup = await claimServer(rdeps, { salt: randomSalt(), verifier: realKeys.verifier }, rbase);
+  check('已经有主、又没带旧 token：409 claimed（服务器不许被偷偷换主）',
+    [claimDup.ok, claimDup.code], [false, 'claimed']);
+  const rmeta1 = await fetchMeta(rdeps, rbase);
+  check('认领后 meta 带出盐（第二台设备靠它把同一口令派生成同一把钥匙）', rmeta1.salt, realSalt);
+
+  const wrongTok = await probeSave(rdeps, 'f'.repeat(64), rbase);
+  check('错的钥匙 → 401 unauthorized（服务器现算 sha256 再比）',
+    [wrongTok.ok, wrongTok.code], [false, 'unauthorized']);
+  const emptyProbe = await probeSave(rdeps, realKeys.token, rbase);
+  check('对的那把钥匙、云端还空着 → empty（不是错误，是状态：接下来是首推）',
+    [emptyProbe.ok, emptyProbe.code], [false, 'empty']);
+
+  // —— 首推 + 回环解密 ——
+  const push1 = await syncPushFlow(rdeps,
+    { keys: { key: realKeys.key, token: realKeys.token }, save: envState, apiKey: FAKE_SK, revision: null }, rbase);
+  check('首推：云端空着时也收（If-Match=none），回来修订 1', [push1.ok, push1.revision], [true, 1]);
+
+  const pulled1 = await syncPullFlow(rdeps,
+    { keys: { key: realKeys.key, token: realKeys.token }, now: SYNC_NOW }, rbase);
+  truthy('拉回来能解开', pulled1.ok === true);
+  check('**存档逐字节一致** —— 真 HTTP 一趟没有改动任何一个字节',
+    JSON.stringify(pulled1.save),
+    JSON.stringify(decodeSave(JSON.stringify(envState), CURRENT_SCHEMA_VERSION, MIGRATIONS, SYNC_NOW).save));
+  check('API Key 跟着信封回来了（换手机不用再抄一次 sk-）', pulled1.apiKey, FAKE_SK);
+  check('拉回来的修订号来自响应头', pulled1.revision, 1);
+
+  // —— 盘上的事实 ——
+  const bin1 = readFileSync(join(syncDataDir, 'save.bin'), 'utf8');
+  const head1 = JSON.parse(bin1.slice(0, bin1.indexOf('\n')));
+  check('修订号与 updatedAt 写在同一份文件的第一行（一次 rename 原子换掉，无错位窗口）',
+    [head1.revision, head1.updatedAt], [1, envState.meta.updatedAt]);
+  const fetched1 = await fetchSave(rdeps, realKeys.token, rbase);
+  check('盘上的密文与 GET 下发的密文逐字节相同',
+    bin1.slice(bin1.indexOf('\n') + 1), fetched1.wire);
+  check('服务器磁盘上只有密文：save.bin 整份里没有一个 sk-', bin1.includes('sk-'), false);
+  check('落盘后没有半途残件（每次写入都以 rename 收尾）',
+    readdirSync(syncDataDir).filter((f) => f.includes('.tmp.')), []);
+
+  // —— 过期 If-Match → 409 且带回云端当前修订 ——
+  const staleIf = await pushSave(rdeps,
+    { token: realKeys.token, wire: 'QUJD', revision: 0, updatedAt: '2020-01-01T00:00:00.000Z' }, rbase);
+  check('过期 If-Match → 409 conflict，且把云端当前修订带回来（横幅靠它裁决）',
+    [staleIf.ok, staleIf.code, staleIf.revision], [false, 'conflict', 1]);
+
+  // —— 第二推：双版本链落在盘上 ——
+  const push2 = await syncPushFlow(rdeps,
+    { keys: { key: realKeys.key, token: realKeys.token }, save: envState, apiKey: null, revision: 1 }, rbase);
+  check('第二推 → 修订 2', [push2.ok, push2.revision], [true, 2]);
+  check('双版本链：save.bin 与 save.prev.bin 都在盘上（旧版从不销毁）',
+    [existsSync(join(syncDataDir, 'save.bin')), existsSync(join(syncDataDir, 'save.prev.bin'))], [true, true]);
+  const prev1 = readFileSync(join(syncDataDir, 'save.prev.bin'), 'utf8');
+  check('prev 里躺着的是上一版（头一行还是修订 1）',
+    JSON.parse(prev1.slice(0, prev1.indexOf('\n'))).revision, 1);
+  const probe2 = await probeSave(rdeps, realKeys.token, rbase);
+  check('HEAD 探针带回云端 updatedAt（横幅上"云端更新于"就是它；头名逐字符对得上）',
+    [probe2.ok, probe2.updatedAt], [true, envState.meta.updatedAt]);
+
+  // —— 第二台设备接入：真服务器上走一遍 meta → 派生 → HEAD 探针 ——
+  const adopt = await syncEnableFlow(rdeps, { passphrase: SYNC_PASS }, rbase);
+  check('接入：口令对、云端有档 → 带回它的修订号（供横幅比较，且不下载正文）',
+    [adopt.ok, adopt.adopted, adopt.cloud.revision], [true, true, 2]);
+  check('同一口令 + 服务器给的盐 → 派生出同一把 token（"第二台设备"的全部魔法）',
+    adopt.keys.token, realKeys.token);
+  const adoptWrongReal = await syncEnableFlow(rdeps, { passphrase: '完全不沾边的口令啊' }, rbase);
+  check('接入：口令不对 → unauthorized，服务器不让猜',
+    [adoptWrongReal.ok, adoptWrongReal.code], [false, 'unauthorized']);
+
+  // —— 超大：21MB 的体在请求头上就被拦下 ——
+  const before413 = await fetchMeta(rdeps, rbase);
+  const big = await pushSave(rdeps,
+    { token: realKeys.token, wire: 'A'.repeat(21 * 1024 * 1024), revision: 2, updatedAt: 'x' }, rbase);
+  check('21MB 的体 → 413 too_large（客户端收到一句人话，而不是 socket 被掐）',
+    [big.ok, big.code], [false, 'too_large']);
+  const after413 = await fetchMeta(rdeps, rbase);
+  check('被拒的推送没有在盘上留下任何痕迹（修订/大小/时间原样）',
+    [after413.revision, after413.size, after413.updatedAt],
+    [before413.revision, before413.size, before413.updatedAt]);
+
+  // —— 删除：云端清掉，但旧版本留在盘上 ——
+  const del = await deleteSave(rdeps, realKeys.token, rbase);
+  truthy('删除成功', del.ok === true);
+  const afterDel = await fetchMeta(rdeps, rbase);
+  check('删除后：meta 上没有存档（但服务器仍有主，盐还在）',
+    [afterDel.claimed, afterDel.salt, afterDel.revision, afterDel.size], [true, realSalt, null, null]);
+  check('删除从不销毁：save.bin 没了，save.prev.bin 还在',
+    [existsSync(join(syncDataDir, 'save.bin')), existsSync(join(syncDataDir, 'save.prev.bin'))], [false, true]);
+
+  // —— 重启：杀掉进程、同一份目录重开 ——
+  await stopRealSync(real);
+  const real2 = await startRealSync();
+  spawnedChildren.push(real2.child);
+  const rbase2 = `http://127.0.0.1:${real2.port}`;
+  const rdeps2 = { fetch: globalThis.fetch, now: () => SYNC_NOW };
+  const rebootMeta = await fetchMeta(rdeps2, rbase2);
+  check('重启后：认领还在（state.json 是独立的一份，进程死活与它无关）',
+    [rebootMeta.claimed, rebootMeta.salt], [true, realSalt]);
+  const rebootProbe = await probeSave(rdeps2, realKeys.token, rbase2);
+  check('重启后：钥匙照样作数、云端仍空（删除是删过的）',
+    [rebootProbe.ok, rebootProbe.code], [false, 'empty']);
+  const pushAfterReboot = await syncPushFlow(rdeps2,
+    { keys: { key: realKeys.key, token: realKeys.token }, save: envState, apiKey: null, revision: null }, rbase2);
+  check('重启后照常接得上：再推一份 → 修订 1', [pushAfterReboot.ok, pushAfterReboot.revision], [true, 1]);
+
+  // —— 日志纪律：这台服务器记过几十条请求，翻遍它也不该出现人家的钥匙 ——
+  const allLogs = real.logs() + real2.logs();
+  check('服务器日志里没有 Authorization、没有 sk-、没有口令明文',
+    [allLogs.includes('Authorization'), allLogs.includes('sk-'), allLogs.includes(SYNC_PASS)], [false, false, false]);
+  truthy('日志每行只有 method/path/status/size 四样（抽查一条 meta 与一条 PUT）',
+    allLogs.includes('[sync] GET /sync/v1/meta 200') && /\[sync\] PUT \/sync\/v1\/save 200 \d+B/.test(allLogs));
+  check('真服务器的 stderr 干干净净（没有意外异常被吞进日志）',
+    (real.errLogs() + real2.errLogs()).trim(), '');
+
+  await stopRealSync(real2);
+  // 目录与进程的最终清理在文件尾的 finally —— 断言抛了也不留孤儿
+
 } catch (err) {
   failed += 1;
   console.error('\n💥 校验脚本自身异常：\n', err);
 } finally {
+  // ㊳ 的保护网：断言抛了也要把真服务器杀掉、临时目录清掉，
+  // 不然 stdout 管道会把整个闸门挂在"等一个已经没人读的进程"上
+  for (const child of spawnedChildren) {
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      // 已经走了
+    }
+  }
+  if (spawnedSyncDir !== null) rmSync(spawnedSyncDir, { recursive: true, force: true });
   await server.close();
 }
 

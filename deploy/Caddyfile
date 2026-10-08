@@ -11,5 +11,15 @@
 # ============================================================================
 
 {$SITE_ADDRESS} {
-  reverse_proxy earthonline:80
+  # 云同步：/sync/* 原样转给同步容器。
+  # 前缀**不剥** —— 服务端路由的字面量就是 /sync/v1/...（见 server/index.mjs）。
+  # 块序有讲究：handle 互斥且**按书写次序**判定，所以前缀那条在前、兜底在最后。
+  handle /sync/* {
+    reverse_proxy sync:3000
+  }
+
+  # 其余一切：应用（nginx 静态）——对外仍然只有这一个域名、一个证书
+  handle {
+    reverse_proxy earthonline:80
+  }
 }

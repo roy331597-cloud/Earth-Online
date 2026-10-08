@@ -6,8 +6,11 @@
 进展、兑现奖励。九章篇章结构，中文界面，为手机而生（可"添加到主屏幕"，全屏
 运行，像一个原生应用）。
 
-**数据只存在你的设备里。** 存档在浏览器本地（localStorage），服务器只做静态
-托管：没有账户、没有后端、没有遥测。换服务器、升级版本，记下的东西原样都在。
+**数据默认只存在你的设备里。** 存档在浏览器本地（localStorage），服务器只做
+静态托管：没有账户、没有遥测；不打开云同步时也没有后端。换服务器、升级版本，
+记下的东西原样都在。云同步是可选的一层 —— 打开后服务器上多存一份**口令加密的
+密文**（服务器读不懂内容，换手机输口令即恢复），细节见
+[docs/DEPLOY.md](docs/DEPLOY.md) 第三节。
 
 ## 快速开始
 
@@ -21,9 +24,9 @@ npm run verify:ops  # 不变量断言全集（改引擎 / 内容目录后必跑�
 ## 部署
 
 一页式说明见 [docs/DEPLOY.md](docs/DEPLOY.md)。推荐做法是**一条命令起整个栈**：
-`docker compose up -d --build` 同时拉起应用与 Caddy，域名填进 `.env` 就自动 HTTPS。
-服务器上装不了 Docker 时可用备选路径（Node + nginx，配置见
-[`deploy/nginx-bare.conf`](deploy/nginx-bare.conf)）。
+`docker compose up -d --build` 同时拉起应用、云同步与 Caddy 三个容器，域名填进
+`.env` 就自动 HTTPS。服务器上装不了 Docker 时可用备选路径（Node + nginx，
+配置见 [`deploy/nginx-bare.conf`](deploy/nginx-bare.conf)）。
 
 带 HTTPS 的域名是"装进手机"的硬前提 —— iOS 与 Android 都把安装限定在安全上下文里。
 
@@ -33,6 +36,7 @@ npm run verify:ops  # 不变量断言全集（改引擎 / 内容目录后必跑�
 - `src/data/catalog/` — 内容目录：职业线、章节、成就、进化树、终局目标
 - `src/components/` — 场景、HUD 与十余块面板（悬赏 / 金库 / 圣殿 / 陈列馆…）
 - `src/store/` — 存档模型与操作；`newGameState.ts` 是玩家的初始档
+- `server/` — 云同步服务（零依赖 Node，只在你自己的服务器上跑；见 `server.Dockerfile`）
 - `scripts/verify-ops.mjs` — 不变量断言全集
 - `docs/DEPLOY.md`、`deploy/` — 部署说明与站点配置
 
