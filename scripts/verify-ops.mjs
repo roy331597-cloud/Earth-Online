@@ -4393,6 +4393,8 @@ try {
       deploy.includes('server/index.mjs'));
   truthy('README：说了云同步（可选、口令加密、服务器只存密文）',
     readme.includes('云同步') && readme.includes('口令加密') && readme.includes('密文'));
+  truthy('部署文档：升级步骤含 caddy 重启（Caddy 只在启动时读一次配置，挂载件变了它不知道）',
+    deploy.includes('docker compose restart caddy'));
 
   // —— ⑫ IP 守门：仓库里不许出现真实的 IP 字面量 ——
   // 对话与记忆里可以记它，仓库不行 —— 文档是给人看、也可能给搜索引擎读的。

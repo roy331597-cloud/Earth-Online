@@ -91,7 +91,13 @@ curl -I https://earth.example.com
 cd earthonline
 git pull
 docker compose up -d --build
+docker compose restart caddy     # 末一行不能省，理由见下
 ```
+
+**为什么要单独重启 caddy**：`deploy/Caddyfile` 是**挂进容器**的文件，Caddy 只在
+启动那一刻读它一次 —— `up -d --build` 只重建"镜像变了"的服务，配置文件改了它
+看不出来。漏了这一行的症状有欺骗性：新规则像没生效（比如 `/sync/*` 落回应用容器，
+收到一页 HTML 而不是 `{"ok":true}`）。重启是一秒钟的事，证书不重签。
 
 服务器是无状态的：升级不涉及任何数据迁移，手机上的存档原样保留。
 刷新页面即见新版本（外壳被配置为不缓存，理由写在站点配置的注释里）。
@@ -175,6 +181,7 @@ docker compose down                    # 停机（下次 up -d 回来）
 | 装了以后图标是灰块 | 删掉重新添加（旧图标缓存）；`public/` 里的图标文件在仓库中随版本走 |
 | 想换图标 | 改构图常量后跑 `node scripts/gen-icons.mjs`，四个尺寸 + SVG 一起重生成 |
 | 控制室里「云同步」整段是灰的 | 不是 HTTPS 打开的（手机的加密能力只在安全上下文里存在），或服务器没起同步容器：`docker compose ps` 看 sync 是否 healthy |
+| 云同步接口返回的是一页 HTML（不是 `{"ok":true}`） | Caddy 还在用启动时那份配置（改了 `deploy/Caddyfile` 却没重启它）：`docker compose restart caddy` |
 | 忘了云同步口令 | 云端密文打不开（设计如此）——本地「导出存档」是底牌；云端那份清掉重来见第三节 |
 | 换了手机 / 清了浏览器数据 | 装好应用、打开同一地址 → 控制室 →「云同步」→「接入」→ 输当时那个口令 |
 
