@@ -5,6 +5,7 @@ import { AgentToast } from '@/components/hud/AgentToast';
 import { AchievementOvation } from '@/components/hud/AchievementOvation';
 import { ChapterCeremony } from '@/components/hud/ChapterCeremony';
 import { ChapterPlate } from '@/components/hud/ChapterPlate';
+import { CloudPullOffer } from '@/components/hud/CloudPullOffer';
 import { RolloverNotice } from '@/components/hud/RolloverNotice';
 import { StatusHud } from '@/components/hud/StatusHud';
 import { DesktopRail, MobileDock } from '@/components/nav/DockNav';
@@ -22,6 +23,7 @@ import { VaultPanel } from '@/components/panels/VaultPanel';
 import { SceneAnchors } from '@/components/scene/SceneAnchors';
 import { SceneCanvas, preloadAllTimeOfDayVariants } from '@/components/scene/SceneCanvas';
 import { GUANGHUA_SCENE, bandForHour, getScene } from '@/data/catalog/scenes';
+import { useCloudSync } from '@/hooks/useCloudSync';
 import { useDailyRollover } from '@/hooks/useDailyRollover';
 import { useNow } from '@/hooks/useNow';
 import type { PanelKey } from '@/lib/panels';
@@ -66,11 +68,11 @@ import { useEarthOnlineStore, useSave } from '@/store/useEarthOnlineStore';
  *   · **场景锚点**（SceneAnchors）：上面这些面板的第二个入口。手机端的
  *     「关系」「属性」「圣殿」没有进 Dock（见 lib/panels.ts 的说明），分别从场景里的
  *     「有人刚好抬头」「玻璃幕墙」「天边」进去 —— 界面上的东西该长在场景里。
- *   · **跨天结算**（RolloverNotice z-70）、**AI 运转遮罩**（AgentBusyOverlay z-80）、
- *     **提示条**（AgentToast z-85）、**金色光晕**（AchievementOvation z-88）
- *     与 **通关仪式**（ChapterCeremony z-90）：
+ *   · **跨天结算**（RolloverNotice z-70）、**云端拉取提议**（CloudPullOffer z-76）、
+ *     **AI 运转遮罩**（AgentBusyOverlay z-80）、**提示条**（AgentToast z-85）、
+ *     **金色光晕**（AchievementOvation z-88）与 **通关仪式**（ChapterCeremony z-90）：
  *     挂在根层而不是某个面板里，因为它们跟"你正在看哪一页"无关。
- *     四者的高低次序见下方 JSX 里的说明。
+ *     六者的高低次序见下方 JSX 里的说明。
  */
 export default function App() {
   const now = useNow();
@@ -80,6 +82,10 @@ export default function App() {
 
   // 跨天结算：开机、跨天、切回前台三个时机都会问到（见 useDailyRollover）
   useDailyRollover(now);
+
+  // 云同步：开机、切回前台、网络回来三个时机问一次云端（见 useCloudSync）。
+  // 没启用同步的设备上它是空转的 —— 依赖 enabled，一次请求也不发。
+  useCloudSync();
 
   // 挂载时做两件事：把新建的存档落盘；把其余时段背景图预热一遍
   useEffect(() => {
@@ -179,21 +185,25 @@ export default function App() {
       )}
 
       {/*
-        根层的五件浮层，按 z 从低到高：
-        结算 70 / 遮罩 80 / 提示条 85 / 金色光晕 88 / 仪式 90。
-        它们都不在面板里面 —— 因为这五件事跟"你正在看哪一页"无关。
+        根层的六件浮层，按 z 从低到高：
+        结算 70 / 云同步提议 76 / 遮罩 80 / 提示条 85 / 金色光晕 88 / 仪式 90。
+        它们都不在面板里面 —— 因为这六件事跟"你正在看哪一页"无关。
 
         ① 跨天结算：可能在你刚打开应用时就站在你面前
-        ② AI 遮罩：AI 在等的时候，整个界面对你都是"忙着"的，
+        ② 云同步提议：云端那份与本机对不上时的一条裁决横幅（非模态）。
+           排在结算之上、遮罩之下 —— 一屏同时来两件事时先让玩家看完结算；
+           而 AI 遮罩是"整个界面正在忙"，该盖得住它（见该组件的文件头）
+        ③ AI 遮罩：AI 在等的时候，整个界面对你都是"忙着"的，
            所以它必须能盖住任何面板，也必须能盖住结算
-        ③ 提示条：一次调用的结果（降级了、没接上）。它在遮罩之上，
+        ④ 提示条：一次调用的结果（降级了、没接上）。它在遮罩之上，
            因为提示常常与下一次调用同时发生（见 AgentToast 的文件头）
-        ④ 金色光晕：一枚徽记点亮。它够重，所以压得住任何面板；
+        ⑤ 金色光晕：一枚徽记点亮。它够重，所以压得住任何面板；
            但它没有重到能把一个人一生只有几次的那件事挡住
-        ⑤ 通关仪式：一个人一辈子只遇到几次的事，
-           在它面前，上面四层都该让路
+        ⑥ 通关仪式：一个人一辈子只遇到几次的事，
+           在它面前，上面五层都该让路
       */}
       <RolloverNotice />
+      <CloudPullOffer />
       <AgentBusyOverlay />
       {/* 提示条压在遮罩**之上**（85 vs 80）：提示常在"上一个 Agent 刚跑完、
           下一个已起跑"的那一刻出现，压在下面会整条寿命都花在遮罩背后 */}

@@ -23,6 +23,8 @@
 //   ㉜ 出厂清场（空档：结构完整 / 引用隔离 / 全空清单 / 漏斗空转两遍）
 //   ㉝ 手写每日（第二支笔：写下来 / 惩罚定格 / 拒绝路径）
 //   ㉞ 手写任务（直接进「进行中」）  ㉟ 出题处方（两份素材、雾不外泄）
+//   ㊱ 云同步原语（口令 → 钥匙 → 密文）  ㊲ 云同步协议（假服务器走穿全流程）
+//   ㊳ 云同步端到端（起一台**真服务器**，与真客户端对穿）
 //
 // ①–⑨ 验的是**写**（状态怎么流转）；⑩–⑬ 验的是**读**（selector 从状态里读出什么）。
 // 读错了不抛异常，只会安静地显示一个错的东西 —— 所以更值得钉住。
@@ -138,6 +140,21 @@
 //    组合，产出一律落「待议」（与灵感框同一条闸门）。㉟ 里最要紧的一条是
 //    **雾不外泄**：藏着的格子一旦进了素材，玩家会在草稿里读到本该自己发现的
 //    那一格 —— 错了不会崩，只会剧透。
+//
+// ㊱–㊳ 是云同步批。这一批要钉的东西与前面全都不同：**它第一次让"数据离开这台设备"。**
+//    于是"错了会怎样"也跟着换了量级 —— 前面的错顶多是"记错一笔"，
+//    这里的错可以是"云端那份永远解不开了"或者"凭证在路上泄露了"。
+//    三节分工：
+//      ㊱ 原语 —— 口令派生的钥匙必须可复现（否则每次开机的 token 都不同）、
+//         必须不可反推、密文必须经得起改一个字符；以及**信封里锁着 API Key，
+//         而上线体里永远不许出现 `sk-`**。这些错了都不会崩 —— 只会静默地不安全。
+//      ㊲ 协议 —— 用一台记账的假服务器把"启用 / 推送 / 拉取 / 冲突 / 断网 /
+//         旧版本存档拉取即迁移"走穿。最要紧的一条：**409 与 401 不许被吞掉** ——
+//         吞掉 409 就是静默覆盖别人的进度，吞掉 401 就是拿着废 token 一直重试。
+//      ㊳ 端到端 —— 用 `node server/index.mjs` 起**真的那台服务器**（临时数据目录），
+//         让真客户端协议与之对穿。它守的是"客户端与服务器各写各的、悄悄漂移"：
+//         verifier 的算法、base64url 的形态、If-Match 的语义 —— 漂了以后的
+//         症状是"口令明明对却一直 401"，在真机上极难定位，所以要在交付前大声地失败。
 //
 // 还有一条只有这条脚本能钉住的东西：**纯函数的拒绝路径必须原对象返回**。
 // 全项目所有 operation 都遵守这条自律（见 operations.ts），而它一旦破掉，
@@ -4618,6 +4635,451 @@ try {
       .filter((t) => b.idea.includes(t));
     check(`目标「${g.title}」的拆解处方不泄露藏着的格子`, leaked, []);
   }
+
+  // -------------------------------------------------------------------------
+  console.log('\n【㊱ 云同步 · 加密原语：口令 → 钥匙，钥匙 → 锁】');
+  // -------------------------------------------------------------------------
+  const {
+    deriveKeyMaterial, importAesKey, encryptPayload, decryptPayload,
+    computeVerifier, randomSalt, b64ToBytes, syncAllowed, PBKDF2_ITERATIONS,
+  } = await server.ssrLoadModule('/src/lib/syncCrypto.ts');
+  const {
+    buildEnvelope, openEnvelope, compareCloud, summarizeProgress, localSaveBytes,
+  } = await server.ssrLoadModule('/src/lib/syncClient.ts');
+
+  // ⚠️ 口令只在这一节的栈上出现。它从不落盘、从不进请求体 ——
+  //    下面的"全部请求里没有一处出现口令"就是这句话的断言形态。
+  const SYNC_PASS = '地球OL-验收-口令-001';
+  const SYNC_NOW = new Date('2026-10-08T04:00:00.000Z');
+
+  check('迭代次数钉在 21 万（改它就是改全世界的解锁成本）', PBKDF2_ITERATIONS, 210000);
+  const saltA = randomSalt();
+  const saltB = randomSalt();
+  check('盐是 16 字节', b64ToBytes(saltA).length, 16);
+  check('两次取盐不同（恒定的话等于没有盐）', saltA !== saltB, true);
+
+  // —— 派生必须可复现：token 不稳定 = 每次开机都把自己锁在门外 ——
+  const kA1 = await deriveKeyMaterial(SYNC_PASS, saltA);
+  const kA2 = await deriveKeyMaterial(SYNC_PASS, saltA);
+  check('同一口令 + 同一盐 → 同一把钥匙与同一个 token',
+    [kA1.token === kA2.token, kA1.keyB64 === kA2.keyB64, kA1.verifier === kA2.verifier], [true, true, true]);
+  const kB = await deriveKeyMaterial(SYNC_PASS, saltB);
+  check('换一把盐 → 换一把钥匙（盐在干活）', kB.token !== kA1.token, true);
+  const kC = await deriveKeyMaterial(`${SYNC_PASS}。`, saltA);
+  check('换一个口令 → 换一把钥匙', kC.token !== kA1.token, true);
+  check('verifier 是 sha256 的 hex（64 字符）', /^[0-9a-f]{64}$/.test(kA1.verifier), true);
+  check('verifier 可复现（服务器存的与它逐字符相同）', await computeVerifier(kA1.token), kA1.verifier);
+
+  // —— 锁 / 开 ——
+  const plainSecret = JSON.stringify({ 一句话: '亏损不是失败，不记账才是', photo: 'data:image/jpeg;base64,/9j/AAA' });
+  const wireA = await encryptPayload(kA1.key, plainSecret);
+  const wireB = await encryptPayload(kA1.key, plainSecret);
+  check('同一明文两次加密产生不同密文（IV 每次随机 —— GCM 的铁律）', wireA !== wireB, true);
+  check('解开 = 原文，逐字符相同', await decryptPayload(kA1.key, wireA), plainSecret);
+
+  const restoredKey = await importAesKey(kA1.keyB64);
+  check('从原始字节恢复的钥匙与原钥匙同效（开机免跑 PBKDF2 的依据）',
+    await decryptPayload(restoredKey, wireB), plainSecret);
+
+  let wrongKeyRejected = false;
+  try {
+    await decryptPayload(await importAesKey(kB.keyB64), wireA);
+  } catch {
+    wrongKeyRejected = true;
+  }
+  check('换一把钥匙 → 解不开（GCM 的认证标签在守）', wrongKeyRejected, true);
+
+  const tampered = (wireA[10] === 'A' ? 'B' : 'A') + wireA.slice(1);
+  let tamperRejected = false;
+  try {
+    await decryptPayload(kA1.key, tampered);
+  } catch {
+    tamperRejected = true;
+  }
+  check('密文被改过一个字符 → 拒收', tamperRejected, true);
+
+  let shortRejected = false;
+  try {
+    await deriveKeyMaterial('1234567', saltA);
+  } catch {
+    shortRejected = true;
+  }
+  check('7 位口令拒收（门槛在原始层，不是只在输入框上）', shortRejected, true);
+
+  // —— 运行环境门槛：crypto.subtle 只在安全上下文里存在 ——
+  for (const [label, env, want] of [
+    ['https 域名', { protocol: 'https:', hostname: 'earth.example.com' }, true],
+    ['http://localhost（开发机）', { protocol: 'http:', hostname: 'localhost' }, true],
+    ['http://127.0.0.1（开发机）', { protocol: 'http:', hostname: '127.0.0.1' }, true],
+    ['http://裸 IP（现在这个站的旧形态）', { protocol: 'http:', hostname: '203.0.113.7' }, false],
+    ['没有 window（构建期）', null, false],
+  ]) {
+    check(`环境门槛：${label} → ${want ? '可同步' : '不可同步'}`, syncAllowed(env), want);
+  }
+
+  // —— 信封：API Key 一起锁进去，但上线体里永远不许出现它 ——
+  const envState = createMockState();
+  const FAKE_SK = 'sk-verify-0000000000000000';
+  const envWire = await buildEnvelope(kA1.key, envState, FAKE_SK);
+  check('信封密文里不含 sk-（服务器与日志永远见不到它）', envWire.includes('sk-'), false);
+  const openedEnv = await openEnvelope(kA1.key, envWire);
+  check('信封解开 = 存档 JSON 逐字符相同', openedEnv.saveJson, JSON.stringify(envState));
+  check('信封解开 = API Key 回来了', openedEnv.apiKey, FAKE_SK);
+  const noKeyWire = await buildEnvelope(kA1.key, envState, null);
+  check('没有 API Key 的信封解出 null（而不是空串冒充）', (await openEnvelope(kA1.key, noKeyWire)).apiKey, null);
+
+  const futureWire = await encryptPayload(kA1.key, JSON.stringify({ v: 99, save: envState, apiKey: null }));
+  let futureRejected = false;
+  try {
+    await openEnvelope(kA1.key, futureWire);
+  } catch {
+    futureRejected = true;
+  }
+  check('信封版本不认识 → 抛错而不是硬读（老客户端遇见新格式的姿势）', futureRejected, true);
+
+  // —— 纯决策与摘要 ——
+  const metaShim = (revision) => ({ claimed: true, salt: 'x', revision, updatedAt: 'T', size: 1, maxBytes: 1 });
+  const localRev = envState.meta.revision;
+  check('云端还空着 → 推', compareCloud(localRev, { claimed: false, salt: null, revision: null, updatedAt: null, size: null, maxBytes: 1 }), 'push');
+  check('云端更靠前 → 挂横幅（绝不自动拉）', compareCloud(localRev, metaShim(localRev + 3)), 'offer');
+  check('本地更靠前 → 推', compareCloud(localRev + 3, metaShim(localRev)), 'push');
+  check('一样新 → 什么都不做', compareCloud(localRev, metaShim(localRev)), 'equal');
+  truthy('摘要是一句人话（带线别头衔与日记条数）', summarizeProgress(envState).includes('成功日记'));
+  truthy('本地字节数可量（横幅上两边要比大小）', localSaveBytes(envState) > 1000);
+
+  // -------------------------------------------------------------------------
+  console.log('\n【㊲ 云同步 · 协议流程：假服务器把整条路走穿】');
+  // -------------------------------------------------------------------------
+  const {
+    fetchMeta, claimServer, probeSave, deleteSave,
+    syncEnableFlow, syncPushFlow, syncPullFlow, syncRotatePassphraseFlow, SYNC_BASE_PATH,
+  } = await server.ssrLoadModule('/src/lib/syncClient.ts');
+
+  /**
+   * 一台记账的假同步服务器：与 server/index.mjs 是同一份合同的简化实现。
+   * 它认 token 的姿势与真服务器一致 —— 存 verifier（sha256），届时现算现比。
+   * （真"客户端与真服务器"的对穿是 ㊳ 的事。）
+   */
+  const makeSyncServer = () => {
+    const sends = [];
+    let claimed = false;
+    let salt = null;
+    let verifier = null;
+    let blob = null;
+    let prevBlob = null;
+    let revision = null;
+    let updatedAt = null;
+    let maxBytes = 20 * 1024 * 1024;
+    let failNext = null;
+
+    const reply = (status, body, headers = {}) => ({
+      ok: status >= 200 && status < 300,
+      status,
+      text: async () => body,
+      headers: { get: (k) => headers[k.toLowerCase()] ?? null },
+    });
+
+    const tokenOf = (headers) => {
+      const a = headers.Authorization ?? '';
+      return a.startsWith('Bearer ') ? a.slice(7) : null;
+    };
+    const authed = async (headers) => {
+      const t = tokenOf(headers);
+      if (t === null || verifier === null) return false;
+      return (await computeVerifier(t)) === verifier;
+    };
+
+    const fetchImpl = async (url, init) => {
+      sends.push({ url, method: init.method, headers: init.headers, body: init.body });
+      if (failNext) {
+        const e = failNext;
+        failNext = null;
+        throw e;
+      }
+      const path = url.replace(SYNC_BASE_PATH, '');
+      const h = init.headers;
+
+      if (path === '/meta') {
+        return reply(200, JSON.stringify({ claimed, salt, revision, updatedAt, size: blob === null ? null : blob.length, maxBytes }));
+      }
+      if (path === '/claim') {
+        const body = JSON.parse(init.body);
+        if (!claimed) {
+          claimed = true;
+          salt = body.salt;
+          verifier = body.verifier;
+          return reply(201, '{}');
+        }
+        if (!(await authed(h))) return reply(409, JSON.stringify({ error: 'claimed' }));
+        salt = body.salt;
+        verifier = body.verifier;
+        return reply(200, '{}');
+      }
+      if (path === '/save') {
+        if (!(await authed(h))) return reply(401, JSON.stringify({ error: 'unauthorized' }));
+        if (init.method === 'GET' || init.method === 'HEAD') {
+          if (blob === null) return reply(404, JSON.stringify({ error: 'empty' }));
+          const headers = {
+            'x-save-revision': String(revision),
+            'x-save-updated-at': updatedAt ?? '',
+            'content-length': String(blob.length),
+          };
+          return reply(200, init.method === 'GET' ? blob : '', headers);
+        }
+        if (init.method === 'PUT') {
+          const size = (init.body ?? '').length;
+          if (size > maxBytes) return reply(413, JSON.stringify({ error: 'too_large' }));
+          const want = h['If-Match'];
+          if (blob !== null && want !== String(revision)) {
+            return reply(409, JSON.stringify({ error: 'conflict', revision }), { 'x-save-revision': String(revision) });
+          }
+          prevBlob = blob;
+          blob = init.body;
+          revision = Number(h['X-Save-Revision']);
+          updatedAt = h['X-Save-UpdatedAt'];
+          return reply(200, JSON.stringify({ revision, size }));
+        }
+        if (init.method === 'DELETE') {
+          if (blob === null) return reply(404, JSON.stringify({ error: 'empty' }));
+          prevBlob = blob;
+          blob = null;
+          revision = null;
+          updatedAt = null;
+          return reply(200, '{}');
+        }
+      }
+      return reply(404, JSON.stringify({ error: 'no_route' }));
+    };
+
+    fetchImpl.sends = sends;
+    fetchImpl.snapshot = () => ({ claimed, salt, verifier, blob, prevBlob, revision, updatedAt });
+    fetchImpl.corrupt = () => {
+      blob = (blob?.[7] === 'A' ? 'B' : 'A') + (blob ?? '').slice(1);
+    };
+    fetchImpl.forceBlob = (wire, rev, at) => {
+      prevBlob = blob;
+      blob = wire;
+      revision = rev;
+      updatedAt = at;
+    };
+    fetchImpl.setMaxBytes = (n) => {
+      maxBytes = n;
+    };
+    fetchImpl.failNextWith = (err) => {
+      failNext = err;
+    };
+    return fetchImpl;
+  };
+
+  const srv = makeSyncServer();
+  const sdeps = { fetch: srv, now: () => SYNC_NOW };
+
+  const meta0 = await fetchMeta(sdeps);
+  check('meta：全新的服务器是"未认领"', [meta0.claimed, meta0.salt, meta0.revision], [false, null, null]);
+
+  // —— 启用（首次 claim）——
+  const enabled = await syncEnableFlow(sdeps, { passphrase: SYNC_PASS });
+  truthy('启用成功', enabled.ok === true);
+  check('首次启用走 claim 分支', enabled.adopted, false);
+  check('claim 请求体只有 salt 与 verifier 两格', Object.keys(JSON.parse(srv.sends.find((x) => x.url.endsWith('/claim')).body)).sort(), ['salt', 'verifier']);
+  const srvAfterClaim = srv.snapshot();
+  check('服务器存下的是 verifier（sha256），与客户端算的一致',
+    [srvAfterClaim.verifier, srvAfterClaim.verifier === enabled.keys.verifier], [enabled.keys.verifier, true]);
+
+  const secondClaim = await claimServer(sdeps, { salt: randomSalt(), verifier: 'a'.repeat(64) }, '');
+  check('旁人想再 claim 一次 → 409 claimed（门关着）', [secondClaim.ok, secondClaim.code], [false, 'claimed']);
+
+  // —— 推第一份 ——
+  const pushed = await syncPushFlow(sdeps, { keys: enabled.keys, save: envState, apiKey: FAKE_SK, revision: null });
+  truthy('首推成功', pushed.ok === true);
+  check('首推之后服务器修订 = 1', pushed.revision, 1);
+  const srvAfterPush = srv.snapshot();
+  check('推上去的是密文：不含 sk-，也不是明文 JSON',
+    [srvAfterPush.blob.includes('sk-'), srvAfterPush.blob.includes('"meta"')], [false, false]);
+  check('全部请求里没有一处出现明文口令',
+    srv.sends.filter((x) => JSON.stringify(x).includes(SYNC_PASS)), []);
+  check('全部请求里没有一处出现 sk-',
+    srv.sends.filter((x) => JSON.stringify(x).includes('sk-')), []);
+
+  // —— HEAD 探针：接入流程的口令验证（只带头，不要体）——
+  const probeOk = await probeSave(sdeps, enabled.keys.token, '');
+  check('HEAD 探针：口令对着、云端有档 → 带回修订', [probeOk.ok, probeOk.revision, probeOk.size > 0], [true, 1, true]);
+  const badKeys = await deriveKeyMaterial('另一个完全不沾边的口令', srvAfterClaim.salt);
+  const probeBad = await probeSave(sdeps, badKeys.token, '');
+  check('HEAD 探针：口令不对 → 401 unauthorized', [probeBad.ok, probeBad.code], [false, 'unauthorized']);
+
+  // —— 拿旧修订去推 → 409 带回当前修订（"玩家裁决"的机械形态）——
+  const stalePush = await syncPushFlow(sdeps, { keys: enabled.keys, save: envState, apiKey: null, revision: 99 });
+  check('拿旧修订去推 → 409 冲突，并带回服务器当前修订',
+    [stalePush.ok, stalePush.code, stalePush.revision], [false, 'conflict', 1]);
+
+  // —— 拉回来 ——
+  const pulled = await syncPullFlow(sdeps, { keys: enabled.keys, now: SYNC_NOW });
+  truthy('拉取成功', pulled.ok === true);
+  check('拉下来的存档与推上去的逐字节相同', JSON.stringify(pulled.save), JSON.stringify(envState));
+  check('API Key 跟着信封回来了', pulled.apiKey, FAKE_SK);
+  check('拉取本身不写任何东西（替换本地是 store 的事）', pulled.revision, 1);
+
+  // —— 口令不对：401，本地什么都不动 ——
+  const rejected = await syncPullFlow(sdeps, { keys: badKeys, now: SYNC_NOW });
+  check('口令不对 → unauthorized（这一层连解密都不会走到）', [rejected.ok, rejected.code], [false, 'unauthorized']);
+
+  // —— 密文损坏：解不开，也绝不"尽力而为"地塞给本地 ——
+  srv.corrupt();
+  const corrupted = await syncPullFlow(sdeps, { keys: enabled.keys, now: SYNC_NOW });
+  check('密文被损坏 → decrypt 失败，结果里没有 save 可落地',
+    [corrupted.ok, corrupted.code, 'save' in corrupted], [false, 'decrypt', false]);
+  srv.forceBlob(srvAfterPush.blob, 1, srvAfterPush.updatedAt); // 复原
+
+  // —— 旧版本云端存档：拉取即迁移（与"打开应用"同一条迁移链）——
+  const oldCloudSave = structuredClone(envState);
+  oldCloudSave.meta.schemaVersion = 1;
+  delete oldCloudSave.weeklies;
+  delete oldCloudSave.player.attributeHistory;
+  delete oldCloudSave.network.solverLog;
+  for (const q of Object.values(oldCloudSave.quests.byId)) delete q.linkedContactIds;
+  for (const c of oldCloudSave.network.contacts) delete c.note;
+  for (const r of oldCloudSave.milestones.records) {
+    delete r.customTitle;
+    delete r.customCategory;
+  }
+  delete oldCloudSave.unlockables.achievementUnlockedAt;
+  delete oldCloudSave.unlockables.pendingAchievementIds;
+  oldCloudSave.ai.model = 'deepseek-chat';
+  const oldWire = await buildEnvelope(enabled.keys.key, oldCloudSave, null);
+  srv.forceBlob(oldWire, 7, '2026-09-01T00:00:00.000Z');
+  const migratedPull = await syncPullFlow(sdeps, { keys: enabled.keys, now: MIG_NOW });
+  truthy('旧版本云端存档：拉取成功', migratedPull.ok === true);
+  check('拉下来就升到当前版本', migratedPull.save.meta.schemaVersion, CURRENT_SCHEMA_VERSION);
+  check('与"直接从文件导入这份老档"走同一条链（结果逐字节相同）',
+    JSON.stringify(migratedPull.save),
+    JSON.stringify(decodeSave(JSON.stringify(oldCloudSave), CURRENT_SCHEMA_VERSION, MIGRATIONS, MIG_NOW).save));
+  truthy('迁移的说明被带回来了（要告诉玩家，但不必吓他）', typeof migratedPull.note === 'string');
+
+  // —— 超大存档：413 在读体之前就拦下 ——
+  srv.setMaxBytes(64);
+  const tooBig = await syncPushFlow(sdeps, { keys: enabled.keys, save: envState, apiKey: null, revision: 7 });
+  check('超过服务器上限 → too_large', [tooBig.ok, tooBig.code], [false, 'too_large']);
+  srv.setMaxBytes(20 * 1024 * 1024);
+
+  // —— 删除云端 ——
+  const deleted = await deleteSave(sdeps, enabled.keys.token, '');
+  truthy('删除成功', deleted.ok === true);
+  const afterDelete = await fetchMeta(sdeps);
+  check('删除后 meta 上没有存档了（但服务器仍有主）',
+    [afterDelete.claimed, afterDelete.revision, afterDelete.size], [true, null, null]);
+  check('上一版仍留在服务器上（删除从不销毁 —— 顶掉的那份挪成 prev）', srv.snapshot().prevBlob !== null, true);
+
+  // —— 断网：安静地转成"离线"，不假装成功 ——
+  srv.failNextWith(new Error('fetch failed'));
+  const offline = await fetchMeta(sdeps);
+  check('断网 → network（调用方据此显示离线，而不是弹一个吓人的错误）',
+    [offline.ok, offline.code], [false, 'network']);
+
+  // —— 接入分支：同一台服务器上，第二台设备用口令接进来 ——
+  const srv2 = makeSyncServer();
+  const d2 = { fetch: srv2, now: () => SYNC_NOW };
+  const firstDevice = await syncEnableFlow(d2, { passphrase: SYNC_PASS });
+  truthy('接入前提：第一台设备已 claim', firstDevice.ok === true);
+  const adoptEmpty = await syncEnableFlow(d2, { passphrase: SYNC_PASS });
+  check('第二台设备接入：口令对、云端还空着 → 视为接入成功（接下来是首推）',
+    [adoptEmpty.ok, adoptEmpty.adopted, adoptEmpty.cloud.revision], [true, true, null]);
+  await syncPushFlow(d2, { keys: firstDevice.keys, save: envState, apiKey: null, revision: null });
+  const adoptFull = await syncEnableFlow(d2, { passphrase: SYNC_PASS });
+  check('第二台设备接入：口令对、云端有档 → 带回它的修订号（供横幅比较）',
+    [adoptFull.ok, adoptFull.adopted, adoptFull.cloud.revision], [true, true, 1]);
+  const adoptWrong = await syncEnableFlow(d2, { passphrase: '完全不沾边的口令啊' });
+  check('第二台设备接入：口令不对 → unauthorized，不许"猜一个"',
+    [adoptWrong.ok, adoptWrong.code], [false, 'unauthorized']);
+
+  // —— 更换口令：换锁，不换里面的东西 ——
+  // 不需要旧口令（旧 token 一直在本机键槽里，它才是向服务器证明身份的东西）。
+  // 这一步要同时钉住三件事：新钥加密了云端、旧 token 作废、旧钥匙解不开。
+  const NEW_PASS = '地球OL-验收-新口令-002';
+  const beforeRotate = srv2.snapshot();
+  const rotated = await syncRotatePassphraseFlow(d2, {
+    passphrase: NEW_PASS,
+    oldToken: firstDevice.keys.token,
+    save: envState,
+    apiKey: FAKE_SK,
+  });
+  truthy('换口令成功', rotated.ok === true);
+  check('换口令顺带把本机存档推了上去（修订 1 → 2）', [rotated.pushed, rotated.revision], [true, 2]);
+  const srvRotated = srv2.snapshot();
+  check('服务器上的盐跟着换了（两把口令之间不再共享任何输入）', srvRotated.salt !== beforeRotate.salt, true);
+  check('服务器存的 verifier 换成了新钥的',
+    [srvRotated.verifier, srvRotated.verifier === rotated.keys.verifier], [rotated.keys.verifier, true]);
+  const rotateClaimSend = srv2.sends.filter((x) => x.url.endsWith('/claim')).pop();
+  check('换验那一步带着旧 token 认证（换锁的人得先证明自己是现在的主人）',
+    rotateClaimSend.headers.Authorization, `Bearer ${firstDevice.keys.token}`);
+  check('换验请求体里仍然只有 salt 与 verifier',
+    Object.keys(JSON.parse(rotateClaimSend.body)).sort(), ['salt', 'verifier']);
+  check('换口令的全程里没有一处出现新口令明文',
+    srv2.sends.filter((x) => JSON.stringify(x).includes(NEW_PASS)), []);
+
+  // 旧 token 作废 / 新 token 生效 —— 这是"别的设备要用新口令重新接入"的机械形态
+  const oldProbe = await probeSave(d2, firstDevice.keys.token, '');
+  check('旧 token 作废了（别的设备手里那把会被服务器拒掉）',
+    [oldProbe.ok, oldProbe.code], [false, 'unauthorized']);
+  const newProbe = await probeSave(d2, rotated.keys.token, '');
+  check('新 token 即刻生效', [newProbe.ok, newProbe.revision], [true, 2]);
+
+  // 云端那份：新钥解得开、内容与本机逐字节一致；旧钥匙解不开
+  const openedRotated = await openEnvelope(rotated.keys.key, srvRotated.blob);
+  check('云端密文归新钥管：新钥解得开，内容与本机逐字节一致',
+    openedRotated.saveJson, JSON.stringify(envState));
+  check('换口令不吞 API Key：信封里那把原样在里面', openedRotated.apiKey, FAKE_SK);
+  let oldKeyOpened = true;
+  try {
+    await openEnvelope(firstDevice.keys.key, srvRotated.blob);
+  } catch {
+    oldKeyOpened = false;
+  }
+  check('旧钥匙解不开（GCM 的认证标签在守）', oldKeyOpened, false);
+
+  // —— 未认领的服务器上换口令：没有旧验可换，直接重新认领并种下第一份 ——
+  // （卷被清过、或这台设备是"先换口令再启用"的意外路径 —— 两条都不该卡住）
+  const srvFresh = makeSyncServer();
+  const dFresh = { fetch: srvFresh, now: () => SYNC_NOW };
+  const freshRotate = await syncRotatePassphraseFlow(dFresh, {
+    passphrase: NEW_PASS,
+    oldToken: firstDevice.keys.token,
+    save: envState,
+    apiKey: null,
+  });
+  check('服务器没有主时：换口令 = 重新认领 + 用新钥种下第一份',
+    [freshRotate.ok, freshRotate.pushed, freshRotate.revision], [true, true, 1]);
+  const freshProbe = await probeSave(dFresh, freshRotate.keys.token, '');
+  check('认领后新 token 即刻生效', [freshProbe.ok, freshProbe.revision], [true, 1]);
+
+  // —— 失败窗口（推完、换验未成）重试收敛 ——
+  // 手工把服务器摆回"半途"的样子：云端已是新钥密文，但服务器还认旧 token ——
+  // 这正是"第 ③ 步成功、第 ④ 步断网"的后果。重试必须能收敛，而它之所以能，
+  // 是因为重加密的明文来源始终是**本机存档**，与云端密文无关。
+  const srvHalf = makeSyncServer();
+  const dHalf = { fetch: srvHalf, now: () => SYNC_NOW };
+  const devHalf = await syncEnableFlow(dHalf, { passphrase: SYNC_PASS });
+  await syncPushFlow(dHalf, { keys: devHalf.keys, save: envState, apiKey: null, revision: null }); // rev 1
+  const halfKeys = await deriveKeyMaterial(NEW_PASS, randomSalt());
+  const halfPush = await syncPushFlow(dHalf, {
+    keys: { key: halfKeys.key, token: devHalf.keys.token }, // 新钥加密、旧 token 认证
+    save: envState, apiKey: null, revision: 1,
+  });
+  truthy('半途态搭好了（新钥密文推上去了、服务器还在认旧 token）',
+    halfPush.ok === true && halfPush.revision === 2);
+  const retried = await syncRotatePassphraseFlow(dHalf, {
+    passphrase: NEW_PASS,
+    oldToken: devHalf.keys.token,
+    save: envState,
+    apiKey: null,
+  });
+  truthy('半途失败后重试收敛（再点一次就好 —— 不碰云端密文、不问旧口令）', retried.ok === true);
+  const retriedProbe = await probeSave(dHalf, retried.keys.token, '');
+  check('收敛之后：新 token 生效', [retriedProbe.ok, typeof retriedProbe.revision === 'number'], [true, true]);
+  const retriedOld = await probeSave(dHalf, devHalf.keys.token, '');
+  check('收敛之后：旧 token 作废', [retriedOld.ok, retriedOld.code], [false, 'unauthorized']);
+  const reopened = await openEnvelope(retried.keys.key, srvHalf.snapshot().blob);
+  check('收敛后的云端密文归重试那一把新钥管', reopened.saveJson, JSON.stringify(envState));
 
 } catch (err) {
   failed += 1;

@@ -760,6 +760,14 @@ export const STORAGE_KEYS = {
   stateBackup: 'earth-online:state:backup',
   apiKey: 'earth-online:secret:deepseek',
   uiPrefs: 'earth-online:ui-prefs',
+  /**
+   * 云同步的**设备级**配置（开关 / 上次同步时间 / 已知云端修订号）。
+   * 它不进存档：同 `uiPrefs` 一个阵营 —— 换一台设备本就该是另一份配置，
+   * 混进存档会在拉取时把对方设备的配置带过来。见 lib/syncConfig.ts。
+   */
+  sync: 'earth-online:sync',
+  /** 派生出的同步密钥（口令 → PBKDF2 的产物）。与 API Key 同级：独立键、不进存档 */
+  syncKey: 'earth-online:sync:key',
 } as const;
 
 // ---------------------------------------------------------------------------

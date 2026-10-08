@@ -15,6 +15,8 @@
 //
 // 持久化范围：**只有 `save` 对象进 LocalStorage**。
 // 面板开关、悬浮态这类 UI 状态不进存档（EphemeralUiState 的约定，见 types/state.ts）。
+// 云同步那两格（设备配置 `earth-online:sync` 与派生密钥 `earth-online:sync:key`）
+// 在**各自的独立槽位**里，同属"设备级、不进存档"一档，见 lib/syncConfig.ts。
 //
 // ---------------------------------------------------------------------------
 // 什么时候写盘（这一段是本文件最需要想清楚的地方）
@@ -40,6 +42,26 @@ import { MIGRATIONS } from '@/lib/migrations';
 import { createMemoryStorage, decodeSave, encodeSave, resolveStorage } from '@/lib/persistence';
 import type { StorageLike } from '@/lib/persistence';
 import { buildSaveFile, downloadSaveFile, rescueFromBackup, rescueSnapshot, type RescueSnapshot } from '@/lib/saveFile';
+import { readApiKey, writeApiKey } from '@/lib/secretStore';
+import { readSyncConfig, writeSyncConfig } from '@/lib/syncConfig';
+import type { SyncConfig } from '@/lib/syncConfig';
+import {
+  compareCloud,
+  defaultSyncDeps,
+  deleteSave as deleteCloudSave,
+  fetchMeta,
+  isFail,
+  localSaveBytes,
+  resolveSyncEnv,
+  summarizeProgress,
+  syncEnableFlow,
+  syncPullFlow,
+  syncPushFlow,
+  syncRotatePassphraseFlow,
+} from '@/lib/syncClient';
+import type { SyncMeta } from '@/lib/syncClient';
+import { importAesKey, syncAllowed } from '@/lib/syncCrypto';
+import { clearSyncKey, readSyncKey, writeSyncKey } from '@/lib/syncKeyStore';
 import { createNewGameState } from './newGameState';
 import { dismissRolloverNotice, runDailyRollover } from './operations';
 import { forceChapterOneConditions, forcePendingCeremony } from './devFixtures';
@@ -130,17 +152,143 @@ const scheduleSave = (save: EarthOnlineState, onError: (err: string | null) => v
     pendingTimer = null;
     const err = flushSave();
     onError(err);
+    // 本地落盘之后再想上云的事 —— 推的也应该是"磁盘上那一份"。
+    // 上云比落盘慢得多，所以它自己还有一层 5s 防抖 + 30s 节流（见下）。
+    scheduleAutoPush();
   }, WRITE_DEBOUNCE_MS);
 };
 
 // 关页 / 切到后台：把还没写的补上。
 // 这两个事件是最后的机会 —— 之后浏览器可能直接杀掉这个页面。
 if (typeof window !== 'undefined') {
-  window.addEventListener('pagehide', () => void flushSave());
+  window.addEventListener('pagehide', () => {
+    void flushSave();
+    // 走之前再试一次上云。它没有 keepalive（几 MB 的体放不进那个限额），
+    // 可能被浏览器拦腰截断 —— 截断了也没关系：下次打开 checkOnOpen 会把
+    // 落下的补上，这就是防抖窗口出事时的那张网。
+    const st = useEarthOnlineStore.getState();
+    if (st.sync.enabled && st.sync.offer === null && isDirtyNow(st.save)) void st.syncPush();
+  });
   window.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') flushSave();
   });
 }
+
+// ---------------------------------------------------------------------------
+// 云同步（Phase 6）· 调度机械
+//
+// 上面那条链是"点一下 → 350ms 后落盘"，这里接的是"落盘 → 5 秒后上云"。
+// 两层防抖叠在一起是因为它们防的不是同一件事：第一层防序列化掉帧，
+// 第二层防的是"每改一个字就往服务器送一份几 MB 的密文"。
+//
+// 三个数就定住了全部节奏：
+//   · 落盘防抖      350ms（已有）
+//   · 上云防抖      5s   —— 落盘之后再等这么久，一串操作只产生一次推送
+//   · 推送最小间隔  30s  —— 两次推送之间至少隔这么久（显式点按钮不算）
+// ---------------------------------------------------------------------------
+
+/** 存档落盘之后再等这么久才推 —— 给"还想再改一下"留出反悔的余地 */
+const SYNC_PUSH_DEBOUNCE_MS = 5_000;
+
+/** 两次推送之间的最小间隔。上云不是配得上每一下点击的事 */
+const SYNC_PUSH_MIN_INTERVAL_MS = 30_000;
+
+/** 云同步唯一的门槛措辞（商店面板与这里共用一句话，免得两处说法分岔） */
+const SYNC_NEEDS_SECURE =
+  '云同步要在 HTTPS 或本机（localhost）下才能用 —— 浏览器只在安全环境里提供加密能力。';
+
+let autoPushTimer: ReturnType<typeof setTimeout> | null = null;
+/** 最近一次同步**完成**的时刻（成功才记）。最小间隔从它起算 */
+let lastPushDoneAt = 0;
+
+/** 本地有没有还没推上去的改动 —— 自己和自己比（见 syncConfig.pushedUpdatedAt） */
+const isDirtyNow = (save: EarthOnlineState): boolean =>
+  readSyncConfig().pushedUpdatedAt !== save.meta.updatedAt;
+
+/** 一条提议的内容：两边的读数。云端那份的"进度一句话"要拉下来才知道，所以只给本机的。 */
+export interface SyncOffer {
+  cloudRevision: number;
+  cloudUpdatedAt: string | null;
+  cloudBytes: number | null;
+  localRevision: number;
+  localUpdatedAt: string;
+  localBytes: number;
+  localSummary: string;
+}
+
+/** 云同步此刻的相位。`off` = 没启用（或已停用） */
+export type SyncPhase = 'off' | 'idle' | 'syncing' | 'offline' | 'error';
+
+/**
+ * 云同步的**设备级**切片（不持久化；要持久的那部分在 syncConfig.ts）。
+ *
+ * 与 `agentActivity` / `fogOverride` 同一阵营：不进存档、刷新即重算 ——
+ * 它讲的是"此刻这台设备与云的关系"，不是"世界里发生了什么"。
+ */
+export interface SyncState {
+  enabled: boolean;
+  phase: SyncPhase;
+  /** 最近一次失败的原因（一句话）。成功即清 */
+  lastError: string | null;
+  lastSyncAt: string | null;
+  cloudRevision: number | null;
+  cloudUpdatedAt: string | null;
+  /** 非空 = 云端与本机对不上，等玩家裁决（见 components/hud/CloudPullOffer） */
+  offer: SyncOffer | null;
+}
+
+export interface SyncActionResult {
+  ok: boolean;
+  message: string;
+}
+
+const buildOffer = (meta: SyncMeta, save: EarthOnlineState): SyncOffer | null => {
+  if (meta.revision === null) return null; // 云端空着就没有"分歧"可言
+  return {
+    cloudRevision: meta.revision,
+    cloudUpdatedAt: meta.updatedAt,
+    cloudBytes: meta.size,
+    localRevision: save.meta.revision,
+    localUpdatedAt: save.meta.updatedAt,
+    localBytes: localSaveBytes(save),
+    localSummary: summarizeProgress(save),
+  };
+};
+
+/**
+ * 排一次自动推送（防抖：新的一次会顶掉上一次的等待）。
+ *
+ * 两条硬规则在排的时候就检查，fire 的时候也再检查一遍（时间差里世界会变）：
+ *   · 没启用 → 排它做什么；
+ *   · **有分歧待裁决 → 绝不自动推** —— 那等于拿旧底子盖掉云端那份，
+ *     而"分叉永远由玩家裁决"是这个特性的第一条纪律。
+ */
+const scheduleAutoPush = (delayMs: number = SYNC_PUSH_DEBOUNCE_MS): void => {
+  const st = useEarthOnlineStore.getState();
+  if (!st.sync.enabled || st.sync.offer !== null) return;
+  if (autoPushTimer !== null) clearTimeout(autoPushTimer);
+  autoPushTimer = setTimeout(() => {
+    autoPushTimer = null;
+    void runAutoPush();
+  }, delayMs);
+};
+
+const runAutoPush = async (): Promise<void> => {
+  const st = useEarthOnlineStore.getState();
+  if (!st.sync.enabled || st.sync.offer !== null) return;
+  if (st.sync.phase === 'syncing') {
+    // 上一次还在路上：稍后回来看一眼（别把它挤掉，也别把这次改动弄丢）
+    scheduleAutoPush(2_000);
+    return;
+  }
+  if (!isDirtyNow(st.save)) return; // 没有新东西可推 —— 别让云端修订号白涨
+  const wait = lastPushDoneAt + SYNC_PUSH_MIN_INTERVAL_MS - Date.now();
+  if (wait > 0) {
+    scheduleAutoPush(wait);
+    return;
+  }
+  await st.syncPush();
+};
 
 /**
  * 一个正在运转的 Agent。
@@ -228,18 +376,116 @@ interface EarthOnlineStore {
 
   /** 彻底删除存档（含 backup 键） */
   wipe: () => void;
+
+  // —— 云同步（Phase 6）——
+  //
+  // 与上面所有动作的区别：它们的输入是"世界里的事实"，这几个的输入里有一个
+  // **口令**。口令是函数的参数，用完即弃 —— 不进 state、不进配置、不进日志。
+  // 上路的是它的派生物（AES 钥 + token），落盘的是同一份派生物的混淆形态。
+
+  /** 云同步的设备级状态。不进存档 */
+  sync: SyncState;
+
+  /** 启用 / 接入：口令 → 认领或验证 → 存钥 → 首推（或挂提议） */
+  syncEnable: (passphrase: string) => Promise<SyncActionResult>;
+  /**
+   * 推一次。`explicit: true`（设置面板的「立即推送」）表示玩家点名"以本机为准"：
+   * 即便有分歧也推，并且以提议里那份云端修订为基准盖掉它。
+   * 自动推送不显式 —— 有分歧时它会安静地跳过，绝不抢玩家的裁决权。
+   */
+  syncPush: (opts?: { explicit?: boolean }) => Promise<SyncActionResult>;
+  /** 拉取并替换本地。先解密、再快照、后替换 —— 任何一步失败本地都原样不动 */
+  syncPull: () => Promise<SyncActionResult>;
+  /** 开机 / 切回前台时问一次云端：挂提议，或把本地落下的补推，或什么都不做 */
+  syncCheckOnOpen: () => Promise<void>;
+  /** 换口令：新钥重加密 + 旧 token 换验。不需要旧口令（派生物在本机） */
+  syncChangePassphrase: (passphrase: string) => Promise<SyncActionResult>;
+  /** 清掉云端存档（服务器上仍留上一版）。本地存档不动 */
+  syncClearCloud: () => Promise<SyncActionResult>;
+  /** 停用：只把本机的钥匙丢掉。云端原样保留，口令也仍然有效 */
+  syncDisable: () => void;
+  /** 收起那条提议（"稍后"）。云端信号还在 —— 下次开机它会再来 */
+  dismissOffer: () => void;
+  /** 问一句服务器认领过没有（设置面板用它决定按钮是「启用」还是「接入」） */
+  syncProbeServer: () => Promise<'free' | 'claimed' | 'unreachable' | 'unsupported'>;
 }
 
 const initial = loadOrCreate();
 if (initial.note) console.warn('[EarthOnline]', initial.note);
 
-export const useEarthOnlineStore = create<EarthOnlineStore>()((set, get) => ({
+/** 开机时把设备级的同步配置读进来（存储不可用时它就是一份空配置） */
+const initialSyncConfig: SyncConfig = readSyncConfig();
+
+export const useEarthOnlineStore = create<EarthOnlineStore>()((set, get) => {
+  /** 只动 sync 切片的一格/几格 —— 省得每处都手抄一遍展开 */
+  const patchSync = (patch: Partial<SyncState>): void => set({ sync: { ...get().sync, ...patch } });
+
+  /**
+   * 一次**成功**同步之后要记的账：写进设备配置 + 更新切片，一处定义两处生效。
+   *
+   * ⚠️ 它写的是"最后一次成功同步"的三件事实 —— 不是"我看见了什么"。
+   *    这个区别是分叉检测的支点，见 syncConfig.cloudRevision 的注释。
+   */
+  const commitSynced = (o: {
+    cloudRevision: number | null;
+    cloudUpdatedAt: string | null;
+    pushedUpdatedAt: string | null;
+  }): void => {
+    const next: SyncConfig = {
+      ...readSyncConfig(),
+      enabled: true,
+      lastSyncAt: new Date().toISOString(),
+      cloudRevision: o.cloudRevision,
+      cloudUpdatedAt: o.cloudUpdatedAt,
+      pushedUpdatedAt: o.pushedUpdatedAt,
+    };
+    writeSyncConfig(next);
+    lastPushDoneAt = Date.now();
+    patchSync({
+      phase: 'idle',
+      lastError: null,
+      lastSyncAt: next.lastSyncAt,
+      cloudRevision: next.cloudRevision,
+      cloudUpdatedAt: next.cloudUpdatedAt,
+    });
+  };
+
+  /** 三个动作共用的开场检查。返回值非空 = 已经失败了，直接把它交出去 */
+  const syncRefusal = (): SyncActionResult | null => {
+    const st = get();
+    if (!st.sync.enabled) return { ok: false, message: '云同步还没有启用。' };
+    if (st.sync.phase === 'syncing') return { ok: false, message: '上一次同步还在路上 —— 等它结束再试。' };
+    if (!syncAllowed(resolveSyncEnv())) return { ok: false, message: SYNC_NEEDS_SECURE };
+    if (readSyncKey() === null) {
+      const message = '本机的同步钥匙不在了 —— 到控制室里重新接入一次。';
+      patchSync({ phase: 'error', lastError: message });
+      return { ok: false, message };
+    }
+    return null;
+  };
+
+  /** 失败落账：网络问题记成"离线"（安静），其余记成"出错"（要说话） */
+  const noteSyncFailure = (code: string, message: string): SyncActionResult => {
+    patchSync({ phase: code === 'network' ? 'offline' : 'error', lastError: message });
+    return { ok: false, message };
+  };
+
+  return {
   save: initial.save,
   fromDisk: initial.fromDisk,
   persistError: null,
   loadNote: initial.note,
   agentActivity: [],
   fogOverride: false,
+  sync: {
+    enabled: initialSyncConfig.enabled,
+    phase: initialSyncConfig.enabled ? 'idle' : 'off',
+    lastError: null,
+    lastSyncAt: initialSyncConfig.lastSyncAt,
+    cloudRevision: initialSyncConfig.cloudRevision,
+    cloudUpdatedAt: initialSyncConfig.cloudUpdatedAt,
+    offer: null,
+  },
 
   setFogOverride: (on) => {
     // 与 endAgentCall 同一条纪律：值没变就不 set，别让订阅者白渲染一轮
@@ -388,7 +634,298 @@ export const useEarthOnlineStore = create<EarthOnlineStore>()((set, get) => ({
     lastError = null;
     set({ save: createNewGameState(), fromDisk: false, persistError: null });
   },
-}));
+
+  // —— 云同步（Phase 6）——
+  //
+  // 每个动作都遵守两条纪律：
+  //   ① 口令 / 密钥只以函数参数或本地键槽的形态存在 —— patchSync 里永远是
+  //      状态词与时间戳，没有一处会把它们写进 state；
+  //   ② 失败不改本地 —— 推送失败什么都不动；拉取在**全部成功**之前不碰本地。
+
+  syncEnable: async (passphrase) => {
+    const st = get();
+    if (st.sync.enabled) return { ok: false, message: '这台设备已经接上云同步了。' };
+    if (st.sync.phase === 'syncing') return { ok: false, message: '上一次同步还在路上 —— 等它结束再试。' };
+    if (!syncAllowed(resolveSyncEnv())) return { ok: false, message: SYNC_NEEDS_SECURE };
+
+    patchSync({ phase: 'syncing', lastError: null });
+    const out = await syncEnableFlow(defaultSyncDeps(), { passphrase });
+    if (isFail(out)) return noteSyncFailure(out.code, out.message);
+
+    // 钥匙落槽 —— 至此这台设备有了"不输口令也能同步"的本钱
+    writeSyncKey({ k: out.keys.keyB64, t: out.keys.token });
+    writeSyncConfig({ ...readSyncConfig(), enabled: true });
+    patchSync({ enabled: true, phase: 'idle', lastError: null });
+
+    // 云端的存档比我这份还新 → **只挂提议，一个字都不动它**。
+    // 拉还是盖，等玩家看两边的读数自己裁。
+    if (out.adopted && out.cloud.revision !== null) {
+      const offer = buildOffer(out.cloud, get().save);
+      if (offer !== null) patchSync({ offer });
+      return {
+        ok: true,
+        message: `已接入。云端有一份存档（修订 ${out.cloud.revision}）—— 上面那条横幅在等你裁决：拉下来，或者用「立即推送」以本机为准。`,
+      };
+    }
+
+    // 云端空着（新认领或已清空）→ 首推，把本机这份设成云端的第一份
+    const push = await get().syncPush();
+    return push.ok
+      ? { ok: true, message: `已接入。${push.message}` }
+      : { ok: true, message: `已接入，但第一次推送没能完成：${push.message} 等网络稳了它会自己再试。` };
+  },
+
+  syncPush: async (opts) => {
+    const explicit = opts?.explicit === true;
+    const st = get();
+    const refusal = syncRefusal();
+    if (refusal !== null) return refusal;
+    if (!explicit && st.sync.offer !== null) {
+      // 分歧还没裁决：自动推等于拿旧底子盖掉云端那份。**不推**，等玩家。
+      return { ok: false, message: '云端那份还没裁决 —— 先处理上面那条横幅。' };
+    }
+
+    flushSave(); // 推的是磁盘上那一份（与导出同款纪律）
+    const save = get().save;
+    const pair = readSyncKey();
+    if (pair === null) return { ok: false, message: '本机的同步钥匙不在了 —— 到控制室里重新接入一次。' };
+    let key: CryptoKey;
+    try {
+      key = await importAesKey(pair.k);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      patchSync({ phase: 'error', lastError: message });
+      return { ok: false, message };
+    }
+
+    patchSync({ phase: 'syncing', lastError: null });
+    // If-Match 的基准：玩家点名"以本机为准"时用提议里那份云端修订 ——
+    // 那是"我看见了它，并且决定盖掉它"的形态；否则用本设备记忆里的修订。
+    const baseRev =
+      explicit && st.sync.offer !== null ? st.sync.offer.cloudRevision : readSyncConfig().cloudRevision;
+    const out = await syncPushFlow(defaultSyncDeps(), {
+      keys: { key, token: pair.t },
+      save,
+      apiKey: readApiKey(),
+      revision: baseRev,
+    });
+
+    if (!isFail(out)) {
+      commitSynced({
+        cloudRevision: out.revision,
+        cloudUpdatedAt: save.meta.updatedAt,
+        pushedUpdatedAt: save.meta.updatedAt,
+      });
+      patchSync({ offer: null });
+      return { ok: true, message: `已推送到云端（修订 ${out.revision}）。` };
+    }
+
+    if (out.code === 'conflict') {
+      // 云端在别处动过了。**不抢着写** —— 问一句最新读数，把分歧摆给玩家。
+      const meta = await fetchMeta(defaultSyncDeps());
+      if (isFail(meta)) return noteSyncFailure(meta.code, meta.message);
+      const offer = buildOffer(meta, get().save);
+      if (offer !== null) {
+        patchSync({ phase: 'idle', lastError: null, offer });
+        return { ok: false, message: '推送被拒：云端在别处动过了。两边的样子都在横幅里，由你裁决。' };
+      }
+      // 云端其实已经被别处清空了：拿"云端还没有"当新基准，再推一次
+      const retry = await syncPushFlow(defaultSyncDeps(), {
+        keys: { key, token: pair.t },
+        save,
+        apiKey: readApiKey(),
+        revision: null,
+      });
+      if (!isFail(retry)) {
+        commitSynced({
+          cloudRevision: retry.revision,
+          cloudUpdatedAt: save.meta.updatedAt,
+          pushedUpdatedAt: save.meta.updatedAt,
+        });
+        patchSync({ offer: null });
+        return { ok: true, message: `云端已被别处清空 —— 本机这份重新推了上去（修订 ${retry.revision}）。` };
+      }
+      return noteSyncFailure(retry.code, retry.message);
+    }
+
+    if (out.code === 'unauthorized') {
+      return noteSyncFailure(out.code, `${out.message} —— 到控制室里用当时的那个口令重新接入一次。`);
+    }
+    return noteSyncFailure(out.code, out.message);
+  },
+
+  syncPull: async () => {
+    const st = get();
+    const refusal = syncRefusal();
+    if (refusal !== null) return refusal;
+    const pair = readSyncKey();
+    if (pair === null) return { ok: false, message: '本机的同步钥匙不在了 —— 到控制室里重新接入一次。' };
+
+    let key: CryptoKey;
+    try {
+      key = await importAesKey(pair.k);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      patchSync({ phase: 'error', lastError: message });
+      return { ok: false, message };
+    }
+
+    patchSync({ phase: 'syncing', lastError: null });
+    const out = await syncPullFlow(defaultSyncDeps(), {
+      keys: { key, token: pair.t },
+      now: new Date(),
+    });
+    if (isFail(out)) return noteSyncFailure(out.code, out.message);
+
+    // —— 走到这里，云端那份已经解开、也迁移好了；本地一个字都还没动 ——
+    // 覆盖前留底：与「导入存档」同款纪律。**只在急救箱空着时拍** ——
+    // 覆盖掉一份还能救的残损存档，比不拍快照糟得多。
+    if (!st.rescueState().hasBackup) get().snapshotToBackup();
+    get().replaceSave(out.save);
+    if (out.apiKey !== null) writeApiKey(out.apiKey); // 信封里带着的那把，一并恢复
+    commitSynced({
+      cloudRevision: out.revision,
+      cloudUpdatedAt: out.save.meta.updatedAt,
+      pushedUpdatedAt: out.save.meta.updatedAt,
+    });
+    patchSync({ offer: null });
+
+    const parts = [
+      `已把云端那份拉到本机（修订 ${out.revision ?? '—'}）。`,
+      out.apiKey !== null ? '信封里带着的 API Key 也一并恢复了。' : '',
+      out.note ?? '',
+      '拉取前的本地存档留在了急救箱里。',
+    ];
+    return { ok: true, message: parts.filter((p) => p.length > 0).join('') };
+  },
+
+  syncCheckOnOpen: async () => {
+    const st = get();
+    if (!st.sync.enabled || st.sync.phase === 'syncing') return;
+    if (!syncAllowed(resolveSyncEnv())) return; // 环境不允许：连钥匙都不该动
+    if (readSyncKey() === null) {
+      patchSync({ phase: 'error', lastError: '本机的同步钥匙不在了 —— 到控制室里重新接入一次。' });
+      return;
+    }
+
+    const meta = await fetchMeta(defaultSyncDeps());
+    if (isFail(meta)) {
+      // 断网是常态不是故障：安静地记成"离线"，别把红字怼到玩家脸上
+      if (meta.code === 'network') patchSync({ phase: 'offline', lastError: null });
+      else patchSync({ phase: 'error', lastError: meta.message });
+      return;
+    }
+
+    const cfg = readSyncConfig();
+    const verdict = compareCloud(cfg.cloudRevision ?? 0, meta);
+
+    if (verdict === 'offer') {
+      const offer = buildOffer(meta, get().save);
+      if (offer !== null) patchSync({ phase: 'idle', lastError: null, offer });
+      return;
+    }
+    if (verdict === 'push' || isDirtyNow(get().save)) {
+      await get().syncPush();
+      return;
+    }
+    patchSync({ phase: 'idle', lastError: null });
+  },
+
+  syncChangePassphrase: async (passphrase) => {
+    const st = get();
+    const refusal = syncRefusal();
+    if (refusal !== null) return refusal;
+    if (st.sync.offer !== null) {
+      return { ok: false, message: '云端那份还没裁决 —— 先处理上面那条横幅，再换口令。' };
+    }
+
+    flushSave();
+    const save = get().save;
+    const pair = readSyncKey();
+    if (pair === null) return { ok: false, message: '本机的同步钥匙不在了 —— 到控制室里重新接入一次。' };
+    patchSync({ phase: 'syncing', lastError: null });
+    const out = await syncRotatePassphraseFlow(defaultSyncDeps(), {
+      passphrase,
+      oldToken: pair.t,
+      save,
+      apiKey: readApiKey(),
+    });
+
+    if (isFail(out)) {
+      // 旧凭证被服务器拒了 —— 这台服务器上的口令多半已经换过，
+      // 指引玩家用**现在的**那个口令走一次「接入」，而不是在这里瞎试
+      if (out.code === 'unauthorized' || out.code === 'claimed') {
+        return noteSyncFailure(
+          out.code,
+          '旧接入凭证被服务器拒了 —— 这台服务器上的口令可能已经换过。用当时的新口令走一次「接入」，再来换。',
+        );
+      }
+      return noteSyncFailure(
+        out.code,
+        out.code === 'network'
+          ? `${out.message} 稍后用**同一个新口令**再点一次就好（上一次若已推了一半，重试会把它接上）。`
+          : out.message,
+      );
+    }
+
+    writeSyncKey({ k: out.keys.keyB64, t: out.keys.token });
+    commitSynced({
+      cloudRevision: out.revision,
+      // 没推（云端本来就空）时云端依然空着；推了的话云端就是刚上去的这一份
+      cloudUpdatedAt: out.pushed ? save.meta.updatedAt : null,
+      pushedUpdatedAt: out.pushed ? save.meta.updatedAt : readSyncConfig().pushedUpdatedAt,
+    });
+    return {
+      ok: true,
+      message: '口令已更换。云端那份已经用新钥重新锁过 —— 别的设备要用新口令接入。若刚才有推一半的，重试一次它会自己接上。',
+    };
+  },
+
+  syncClearCloud: async () => {
+    const refusal = syncRefusal();
+    if (refusal !== null) return refusal;
+    const pair = readSyncKey();
+    if (pair === null) return { ok: false, message: '本机的同步钥匙不在了 —— 到控制室里重新接入一次。' };
+
+    patchSync({ phase: 'syncing', lastError: null });
+    const out = await deleteCloudSave(defaultSyncDeps(), pair.t);
+    // 云端本来就是空的（404）不算失败 —— 结果与玩家的意图一致
+    if (isFail(out) && out.code !== 'empty') return noteSyncFailure(out.code, out.message);
+
+    writeSyncConfig({ ...readSyncConfig(), cloudRevision: null, cloudUpdatedAt: null, pushedUpdatedAt: null });
+    lastPushDoneAt = Date.now();
+    patchSync({ phase: 'idle', lastError: null, cloudRevision: null, cloudUpdatedAt: null, offer: null });
+    return {
+      ok: true,
+      message:
+        '云端那份已经清掉。服务器上还会留一份上一版（不通过界面提供恢复）。本地存档没有被动过 —— 同步还开着，下次有改动时，它会被当作云端的第一份推上去。',
+    };
+  },
+
+  syncDisable: () => {
+    clearSyncKey();
+    writeSyncConfig({ ...readSyncConfig(), enabled: false });
+    if (autoPushTimer !== null) {
+      clearTimeout(autoPushTimer);
+      autoPushTimer = null;
+    }
+    patchSync({ enabled: false, phase: 'off', lastError: null, offer: null });
+  },
+
+  dismissOffer: () => {
+    // 只收起横幅，**不装作分歧没了**：设备配置一个字不动，
+    // 下次 checkOnOpen 照样会看见云端那份对不上，横幅会再来
+    if (get().sync.offer !== null) patchSync({ offer: null });
+  },
+
+  syncProbeServer: async () => {
+    if (!syncAllowed(resolveSyncEnv())) return 'unsupported';
+    const meta = await fetchMeta(defaultSyncDeps());
+    if (isFail(meta)) return 'unreachable';
+    return meta.claimed ? 'claimed' : 'free';
+  },
+  };
+});
 
 // ---------------------------------------------------------------------------
 // 调试入口（只在 DEV 挂到 window 上）
