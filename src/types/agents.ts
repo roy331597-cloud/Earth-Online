@@ -38,6 +38,7 @@ import type { SchemaName } from '../ai/schemas';
  *   network_advisor 社交智囊
  *   arbiter         复盘判官
  *   chain_reviewer  深度推演审核官（Agent B）
+ *   diagnostician   定标师：开局定标（出题 → 判分写基线）
  */
 export type AgentKind =
   | 'dispatcher'
@@ -45,7 +46,23 @@ export type AgentKind =
   | 'blueprints'
   | 'network_advisor'
   | 'arbiter'
-  | 'chain_reviewer';
+  | 'chain_reviewer'
+  | 'diagnostician';
+
+/**
+ * 任务链生成的**容量档**（三档，Phase 7 迁移《人生进阶指南》）。
+ *
+ * 它是对同一条生成管线说话的一个旋钮，不是三种管线：
+ *   - full    满档：现行口径 —— 每步 15 分钟 ~ 2 小时，整链 8~40 步；
+ *   - light   轻档：每步 15~30 分钟、当天能完 —— 状态好的日子走满档，
+ *             忙碌期换轻档，链还是那条链的逻辑，只是步子收小；
+ *   - relapse 回档：中断之后不许一次补完 —— 只铸一条「三到五步」的最小恢复链，
+ *             先把人接回路上（见 selectors.isStalled 与「回航」）。
+ *
+ * ⚠️ 语义只在 **AI 轨道**生效：本地 mock 轨道（mockForge）链长由种子池深度决定，
+ *    与 MAX_DRAFTS 双口径同一哲学 —— 兜底链的第一职责是"有"，不是"合身"。
+ */
+export type ForgeCapacity = 'full' | 'light' | 'relapse';
 
 export type AgentStatus = 'active' | 'paused' | 'retired';
 
@@ -128,7 +145,11 @@ export interface AgentInvocationLog {
     | 'arbitrate_reflection'
     | 'network_advice'
     | 'create_class'
-    | 'monthly_digest';
+    | 'monthly_digest'
+    /** 开局定标 · 出题（第一遍：把目标改写成可测的一句话，出一套混合题） */
+    | 'design_diagnostic'
+    /** 开局定标 · 判分（第二遍：只判当前水准，写基线） */
+    | 'grade_diagnostic';
   /** 输入摘要（原文过长时截断），用于复盘 Agent 表现 */
   inputDigest: string;
   /** 原始输出（调试用，仅保留最近 20 条完整原文） */
@@ -242,6 +263,11 @@ export interface DispatcherInput {
   rawIdea: string;
   /** 玩家是否勾选了深度推演 */
   deepDeduction: boolean;
+  /**
+   * 本次生成的容量档（见 ForgeCapacity）。
+   * 显式字段，不拼进 rawIdea —— 拼接会污染 sourceIdea 与链标题的兜底文案。
+   */
+  capacity: ForgeCapacity;
   /** 期望的任务形态偏好（可空） */
   preferredShape: 'single' | 'chain' | 'auto' | null;
   /** 现有职业线摘要（由本地组装，避免 AI 幻觉出不存在的 classId） */
@@ -344,6 +370,8 @@ export interface ClassAgentInput {
     /** 该职业最近完成的 5 个任务标题，避免生成重复内容 */
     recentQuestTitles: string[];
   };
+  /** 本次生成的容量档（见 ForgeCapacity；与 DispatcherInput.capacity 同源） */
+  capacity: ForgeCapacity;
   /** 玩家上下文 */
   playerSnapshot: {
     attributes: Record<AttributeKey, number>;
@@ -691,4 +719,69 @@ export interface AgentRequest<TPayload> {
   runtime: AgentRuntimeConfig;
   /** 期望的输出 Schema 名，用于解析校验（见 src/ai/schemas.ts） */
   schemaName: SchemaName;
+}
+
+// ---------------------------------------------------------------------------
+// 11. Diagnostician（定标师）契约
+//
+// 两段式：出题（design_diagnostic）与判分（grade_diagnostic）是**两次独立调用**，
+// 因为中间隔着玩家作答 —— 一次真人写字的时间，不可能也不应该被塞进一次请求。
+// 两次调用各有一份输出契约，落库形状见 types/diagnostics.ts。
+// ---------------------------------------------------------------------------
+
+/** 出题段的输入 */
+export interface DiagnosticSheetInput {
+  /** 玩家写下的目标原话 —— 一字不改地带上，改写是模型的工作 */
+  goalRaw: string;
+  /** 玩家当前等级与精力（用来把题出在"跳一跳够得着"的高度） */
+  playerSnapshot: { level: number; energy: number };
+  /** 现有职业线名单（用于 suggestedClassIds —— 只许从这里挑，避免幻觉出不存在的线） */
+  existingClasses: Array<{ classId: ClassIdLiteral; displayName: string }>;
+}
+
+/** 判分段的输入 */
+export interface DiagnosticVerdictInput {
+  goalRaw: string;
+  goalReframed: string;
+  questions: Array<{ id: string; kind: 'open' | 'choice'; prompt: string; options: string[] }>;
+  answers: Array<{ questionId: string; text: string }>;
+  /** 玩家当前等级（判分要按"起点"说话，等级用来理解他说这句话的位置） */
+  playerSnapshot: { level: number };
+}
+
+/**
+ * 出题段的输出（模型契约形状，落库前经 `ai/adapters.adaptDiagnosticSheet` 收口）。
+ */
+export interface DiagnosticSheetOutput {
+  /** 把目标改写成"可被测量的一句话" —— 保留意图，去掉不可判定的词 */
+  goalReframed: string;
+  /** 建议归属的线（0~3 个，开放集合）。只是建议 —— 铸链时调度员另行裁定 */
+  suggestedClassIds: string[];
+  /**
+   * 考卷：总量 3~5 题。收口在适配层 —— 不足 1 开放 + 2 选择会用种子题补齐并记 correction。
+   * 为什么就这么多：定标是"量一下起点"，不是考试；超过五题开始像入学测评。
+   */
+  questions: Array<{
+    kind: 'open' | 'choice';
+    prompt: string;
+    /** kind === 'choice' 时给 2~4 个候选；开放题给空数组 */
+    options: string[];
+  }>;
+}
+
+/**
+ * 判分段的输出。**只判"现在在哪"**：不给路线、不给鼓励、不写任务 ——
+ * 那些是调度员与职业 Agent 的活。定标师越界一次，这条链的出发点就脏一分。
+ */
+export interface DiagnosticVerdictOutput {
+  /** 一句话水准判断 */
+  levelLabel: string;
+  /** 两三句展开（基线卡上的正文） */
+  summary: string;
+  /** 2~6 个维度，score 为 0~100 的整数 */
+  dimensions: Array<{ key: string; label: string; score: number }>;
+  /** 已经成立的能力，0~4 条 */
+  strengths: string[];
+  /** 最挡路的短板，0~4 条（铸链 idea 会带上它们） */
+  gaps: string[];
 }

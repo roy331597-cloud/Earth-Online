@@ -358,6 +358,8 @@ const CHAINS: QuestChain[] = [
       reviewedAt: '2026-09-28T12:06:00.000Z',
     },
     completed: false,
+    // 两条链都没被主动收束过（收束是 Phase 7 才有的动作）
+    closedAt: null,
   },
   {
     id: 'ch_risk_discipline',
@@ -375,6 +377,7 @@ const CHAINS: QuestChain[] = [
       reviewedAt: null,
     },
     completed: false,
+    closedAt: null,
   },
 ];
 
@@ -990,7 +993,7 @@ for (const branch of BRANCHES) {
 }
 
 // ---------------------------------------------------------------------------
-// 10. 四条职业线的进度（只影响 careers.tracks，其余字段一律从 catalog 取）
+// 10. 五条职业线的进度（只影响 careers.tracks，其余字段一律从 catalog 取）
 // ---------------------------------------------------------------------------
 
 interface TrackProgress {
@@ -1114,15 +1117,16 @@ export function createMockState(): EarthOnlineState {
 
     careers: {
       /**
-       * 四条初始职业线**全部在场**，各自停在不同阶段：
+       * 五条初始职业线**全部在场**，各自停在不同阶段：
        *   计算生物 Lv.5 —— 已经摸到第二档头衔（数据炼金术士）
        *   投资     Lv.3 —— 在走，但比主线慢
        *   内容创作 Lv.1 —— 刚开，还没出过东西
        *   创业     Lv.1 —— 刚开，0 EXP
+       *   英语     Lv.1 —— 刚开，0 EXP（Phase 7 追加的第五条线）
        *
-       * 之所以不是"开两条、留两条未解锁"：catalog/classes.ts 写的是
-       * 「初始 4 条职业线」，四条都是建角就给的。真正会被 Dispatcher 动态铸造的
-       * 是**第五、第六条**。职业面板要展示的是"我在几条线上同时活着"，
+       * 之所以不是"开两条、留几条未解锁"：catalog/classes.ts 写的是
+       * 「初始 5 条职业线」，条条都是建角就给的。真正会被 Dispatcher 动态铸造的
+       * 是**第六条之后**。职业面板要展示的是"我在几条线上同时活着"，
        * 少画两条会让这个面板看起来像个待办清单。
        */
       tracks: CLASSES.map((entry, i) => {
@@ -1280,6 +1284,10 @@ export function createMockState(): EarthOnlineState {
       monthlyExpGranted: { '2026-09': 200 },
       introducedToPlayer: true,
     },
+
+    // 这份夹具里没有进行中的定标、也没有基线档案 ——
+    // 定标流程的用例在 verify-ops 里现场造卷，不靠夹具预置
+    diagnostics: { active: null, history: [] },
 
     agents: {
       records: AGENTS,

@@ -37,6 +37,8 @@ import {
   adaptAdvisorDraft,
   adaptArbiterVerdict,
   adaptClassOutput,
+  adaptDiagnosticSheet,
+  adaptDiagnosticVerdict,
   adaptSolverReport,
   isUsableForge,
   normalizeRerouteOutcome,
@@ -51,6 +53,8 @@ import {
   buildAdvisorPayload,
   buildArbiterPayload,
   buildClassPayload,
+  buildDiagnosticSheetPayload,
+  buildDiagnosticVerdictPayload,
   buildDispatcherPayload,
   buildReroutePayload,
   buildReviewerPayload,
@@ -66,16 +70,22 @@ import {
   mockAdvisorOutput,
   mockChainReviewOutput,
   mockClassAgentOutput,
+  mockDiagnosticSheet,
+  mockDiagnosticVerdict,
   mockDispatcherDecision,
   mockSolverOutput,
 } from '@/lib/mockAgents';
 import { routeClass } from '@/lib/mockForge';
 import { DEFAULT_REROUTE_REQUEST, mockReroute } from '@/lib/mockReroute';
+import { composeDiagnosisIdea } from '@/lib/questBriefs';
 import {
   askNetworkAdvisor,
+  beginDiagnosis,
+  completeDiagnosis,
   completeQuest,
   consultNetworkSolver,
   generateQuestChain,
+  isReroutable,
   regenerateQuestChain,
   regenerationIdea,
   rerouteQuestDraft,
@@ -86,11 +96,13 @@ import type {
   AgentInvocationLog,
   AgentKind,
   AgentRuntimeConfig,
+  ChainId,
   ClassAgentOutput,
   ClassIdLiteral,
   ChainReviewOutput,
   DispatcherDecision,
   EarthOnlineState,
+  ForgeCapacity,
 } from '@/types';
 
 // ---------------------------------------------------------------------------
@@ -111,8 +123,10 @@ export type ThunkResult<T> =
  *   spark      —— 灵感框。失败了，那段话还在框里。
  *   commission —— 悬赏板「让调度员出题」。没有框，素材是系统自己组的处境。
  *   goal       —— 圣殿「拆解成任务链」。素材是目标卡上的那一格里程碑。
+ *   diagnosis  —— 开局定标完成后的自动铸链。素材是定标师写的目标 + 基线 + 短板。
+ *   return     —— 回航。停航很久之后的回归链，素材是最新的未完成链与聚焦目标。
  */
-export type ForgeSource = 'spark' | 'commission' | 'goal';
+export type ForgeSource = 'spark' | 'commission' | 'goal' | 'diagnosis' | 'return';
 
 /**
  * 一条要弹给玩家的提示。
@@ -158,6 +172,7 @@ const KIND_LABEL: Record<AgentKind, string> = {
   network_advisor: '社交 · 智囊',
   arbiter: '复盘 · 判官',
   chain_reviewer: '深度推演 · 审核官',
+  diagnostician: '定标 · 测绘者',
 };
 
 /**
@@ -429,7 +444,11 @@ const mergeSource = (a: ThunkSource, b: ThunkSource): ThunkSource => (a === 'api
  *
  * `primaryConfidence` 给 1：这不是猜的。
  */
-const directedDecision = (idea: string, classId: ClassIdLiteral): DispatcherDecision => ({
+const directedDecision = (
+  idea: string,
+  classId: ClassIdLiteral,
+  capacity: ForgeCapacity = 'full',
+): DispatcherDecision => ({
   intentSummary: clip(idea, 40),
   language: 'zh',
   routing: {
@@ -441,7 +460,9 @@ const directedDecision = (idea: string, classId: ClassIdLiteral): DispatcherDeci
   proposedClass: null,
   // 8 = PO 2026-10-09 口径的下沿（建议 8~40，上限 60）。玩家直点职业线时
   // 没有一个真调度员给厚度建议，取"建议带"的下沿是诚实的默认值。
-  questShape: { kind: 'chain', suggestedChainLength: 8, suggestedType: 'side' },
+  // 回档（relapse）给 4：它就是「三到五步」那条最小恢复链的中值 ——
+  // schema 下限已随之放宽到 3（见 schemas.ts 的注释），不会再被 clamp 回 8。
+  questShape: { kind: 'chain', suggestedChainLength: capacity === 'relapse' ? 4 : 8, suggestedType: 'side' },
   linkedGoalIds: [...(getClass(classId)?.linkedGoalIds ?? [])],
   clarification: null,
   recommendDeepDeduction: false,
@@ -477,11 +498,19 @@ export const createThunks = (deps: ThunkDeps) => {
     deepDeliberation: boolean;
     /** 入口语境（见 ForgeSource）。不影响管线，只决定"东西还在哪"那句话怎么说 */
     from?: ForgeSource;
+    /**
+     * 容量档（满档 / 轻档 / 回档）。**默认 'full'，存量调用零破坏**。
+     * 走两条显式通道进模型：payload 的 `capacity` 字段（不拼进 idea 字符串 ——
+     * 拼接会污染 sourceIdea 与链标题兜底）与 directedDecision 的建议链长。
+     * 本地替身轨道不受它影响：链长由池深决定（见 mockForge 的双口径注释）。
+     */
+    capacity?: ForgeCapacity;
   }): Promise<ThunkResult<{ chainId: string; classId: ClassIdLiteral; stepCount: number }>> => {
     const state0 = deps.getState();
     const now = clock();
     const idea = input.idea.trim();
     if (idea.length === 0) return { ok: false, message: '还没有写下任何想法。' };
+    const capacity = input.capacity ?? 'full';
 
     // 失败时那句"你的东西还在哪"按入口换：灵感框里的话当然还在框里，
     // 而「让调度员出题」「拆解成任务链」没有框 —— 说"灵感还在框里"
@@ -493,7 +522,11 @@ export const createThunks = (deps: ThunkDeps) => {
         ? '调度员正在看你的近况…'
         : from === 'goal'
           ? '正在把它拆成能落地的几步…'
-          : '正在辨认这段想法属于哪条线…';
+          : from === 'diagnosis'
+            ? '正在按你的起点排第一步…'
+            : from === 'return'
+              ? '正在铺一条最短的回归路…'
+              : '正在辨认这段想法属于哪条线…';
 
     const corrections: string[] = [];
     // 一次点击 = 一条提示。深推演会连叫两个 Agent，若两次都因同一个原因（比如余额见底）
@@ -504,7 +537,7 @@ export const createThunks = (deps: ThunkDeps) => {
     // —— ① 这段想法属于哪条线 ——
     let decision: DispatcherDecision;
     if (input.classId !== null) {
-      decision = directedDecision(idea, input.classId);
+      decision = directedDecision(idea, input.classId, capacity);
     } else {
       const agent = resolveAgent(state0, 'dispatcher', null);
       const run = await runAgent(state0, now, {
@@ -514,8 +547,8 @@ export const createThunks = (deps: ThunkDeps) => {
         purpose: 'route_idea',
         label: routeLabel,
         rolePrompt: ROLE_PROMPTS.dispatcher,
-        payload: buildDispatcherPayload(state0, { idea, deepDeliberation: input.deepDeliberation }),
-        mock: () => mockDispatcherDecision(idea),
+        payload: buildDispatcherPayload(state0, { idea, deepDeliberation: input.deepDeliberation, capacity }),
+        mock: () => mockDispatcherDecision(idea, capacity),
       }, said);
       if (run === null) return { ok: false, message: `调度员这次没接上。${retry}` };
       decision = run.data;
@@ -551,7 +584,7 @@ export const createThunks = (deps: ThunkDeps) => {
       label: '正在把这一步拆成一条链…',
       // 蓝图为新职业线生成的提示词将在 Phase 5 从这里接进来（按 classId 查库）
       rolePrompt: CLASS_PROMPT_REF[classId] ?? ROLE_PROMPTS.dispatcher,
-      payload: buildClassPayload(state0, { classId, idea, decision }, now),
+      payload: buildClassPayload(state0, { classId, idea, decision, capacity }, now),
       // 深想 + 不设 token 上限：几十步的链从这里来（见 DEEP_CHAIN_RUNTIME）
       runtimeOverrides: DEEP_CHAIN_RUNTIME,
       mock: () =>
@@ -923,6 +956,18 @@ export const createThunks = (deps: ThunkDeps) => {
     const quest = state0.quests.byId[input.questId];
     if (!quest) return { ok: false, message: '找不到这一步。' };
     if (!quest.chain) return { ok: false, message: '单条任务没有"下一步"，换个做法对它不适用。' };
+    // 与 `rerouteQuestDraft` 的守卫**镜像同一份口径**（REROUTABLE_STATUSES）：
+    // 先在这里挡一道，免得为一个注定被退回的请求先花掉一次模型调用（也免得
+    // 玩家白等一轮）。落库那边仍是最终关口 —— 镜像不是替代。
+    if (!isReroutable(quest)) {
+      return {
+        ok: false,
+        message:
+          quest.status === 'turn_in_pending'
+            ? '这一步正在结算里 —— 先把这次结算结掉，再谈换法。'
+            : '这一步已经结束了，换不了做法。',
+      };
+    }
 
     // 与 `rerouteQuestDraft` 内部**同一条**归一化：空则用缺省诉求、超长则截断。
     // 不这么做的话，模型看到的与落库的会是两份不同的文本，而日志里只会留一份。
@@ -977,7 +1022,176 @@ export const createThunks = (deps: ThunkDeps) => {
     };
   };
 
-  return { forgeChain, regenerateChain, judgeTurnIn, askAdvisor, solveNetwork, reroute };
+  // -------------------------------------------------------------------------
+  // E · 开局定标（先量起点，再谈走多远）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 定标第一段 · 出题。
+   *
+   * 两段式的原因在契约里（types/agents.ts 的 11 节）：出题与判分之间隔着
+   * 一段**真人作答的时间**，不可能也不应该塞进一次请求。所以这里是第一次调用，
+   * 出好卷子就落 `beginDiagnosis` —— 卷子进存档，答到一半刷新不丢。
+   *
+   * Mock 轨道拿到的就是**发给模型的同一个 payload**（不像别的替身那样另组输入）：
+   * 定标的接缝形状（DiagnosticSheetInput）恰好就是替身需要的全部，
+   * 于是"两条轨道同构"在这里是结构性的，而不是靠自觉。
+   */
+  const designDiagnosis = async (input: {
+    goalRaw: string;
+  }): Promise<ThunkResult<{ questionCount: number }>> => {
+    const state0 = deps.getState();
+    const now = clock();
+    const goalRaw = input.goalRaw.trim();
+    if (goalRaw.length === 0) return { ok: false, message: '先写下你想去哪 —— 一句话就够。' };
+
+    const payload = buildDiagnosticSheetPayload(state0, { goalRaw });
+    const agent = resolveAgent(state0, 'diagnostician', null);
+    const run = await runAgent(state0, now, {
+      kind: 'diagnostician',
+      agentId: agent.id,
+      agentName: agent.name,
+      purpose: 'design_diagnostic',
+      label: '测绘者正在量你的起点…',
+      rolePrompt: ROLE_PROMPTS.diagnostician,
+      // 不传 schemaName：diagnostician 的默认输出契约就是出题（diagnosticSheet）
+      payload,
+      mock: () => mockDiagnosticSheet(payload),
+    });
+    if (run === null) return { ok: false, message: '出卷这一步没接上。你写的目标还在，再试一次。' };
+
+    const adapted = adaptDiagnosticSheet(run.data, {
+      knownClassIds: payload.existingClasses.map((c) => c.classId),
+      goalRaw,
+    });
+    deps.mutate((s) => beginDiagnosis(s, goalRaw, adapted.value, now));
+
+    // 读回验证：起卷的两条守卫（空目标 / 空卷）在这里理论上走不到
+    // （上面已挡过空目标，适配层保证卷面 ≥3 题），但"没发生"必须是看得见的，
+    // 而不是让界面进到作答屏对着一条不存在的记录。
+    const active = deps.getState().diagnostics.active;
+    if (active === null || active.goalRaw !== goalRaw) {
+      return { ok: false, message: '卷子没有落进存档，再试一次。' };
+    }
+
+    return {
+      ok: true,
+      data: { questionCount: adapted.value.questions.length },
+      source: run.source,
+      corrections: [...run.corrections, ...adapted.corrections],
+    };
+  };
+
+  /**
+   * 定标第二段 · 判分 + 铸链。
+   *
+   * 顺序是契约钉死的（见 types/state.ts 的 CompleteDiagnosis）：
+   * 判分出基线 → 基线拼成 idea → forgeChain 铸链 → 基线与链 id **一起**
+   * 落 `completeDiagnosis`。铸链失败就什么也不落 —— 记录留在
+   * awaiting_answers 上，玩家可以原样再试一次（那一卷答案还在）。
+   *
+   * 作答从 **active 记录**里读，不从参数进来：交卷是它自己的一步
+   * （`submitDiagnosisAnswers`，UI 在点击的瞬间就落盘），
+   * 这里只负责"读那一卷 + 判"。这样"判分失败后重试"不需要玩家再交一次卷。
+   */
+  const runDiagnosis = async (): Promise<
+    ThunkResult<{ recordId: string; chainId: string; classId: ClassIdLiteral; stepCount: number }>
+  > => {
+    const state0 = deps.getState();
+    const now = clock();
+    const active = state0.diagnostics.active;
+    if (active === null || active.status !== 'awaiting_answers') {
+      return { ok: false, message: '没有正在进行中的定标。' };
+    }
+    if (active.answers.every((a) => a.text.trim().length === 0)) {
+      return { ok: false, message: '至少答一道题，基线才有东西可量。' };
+    }
+
+    // —— ① 判分 ——
+    const payload = buildDiagnosticVerdictPayload(
+      state0,
+      { goalReframed: active.goalReframed, questions: active.questions },
+      { goalRaw: active.goalRaw, answers: active.answers },
+    );
+    const agent = resolveAgent(state0, 'diagnostician', null);
+    const run = await runAgent(state0, now, {
+      kind: 'diagnostician',
+      agentId: agent.id,
+      agentName: agent.name,
+      purpose: 'grade_diagnostic',
+      label: '测绘者正在写你的基线…',
+      rolePrompt: ROLE_PROMPTS.diagnostician,
+      // 同一个 Agent 的第二副面孔：显式覆盖默认 schema（与 rerouteDraft 同一手法）
+      schemaName: 'diagnosticVerdict',
+      payload,
+      mock: () => mockDiagnosticVerdict(payload),
+    });
+    if (run === null) return { ok: false, message: '判分这次没接上。你答的卷子还在，再试一次就行。' };
+
+    const adapted = adaptDiagnosticVerdict(run.data);
+    const corrections = [...run.corrections, ...adapted.corrections];
+    let gradingSource = run.source;
+    let baseline = adapted.value;
+    if (baseline === null) {
+      // 真身给的判分构不成基线（维度不足 2 个）→ 替身顶上。
+      // 与 forgeChain 的 !usable 分支同一条降级哲学：真调用发生过，
+      // 但**落库的不是它给的**，来源因此必须是 mock —— 一个不会报错、
+      // 只会让人误判的谎，这里不撒第二遍。
+      baseline = mockDiagnosticVerdict(payload);
+      gradingSource = 'mock';
+    }
+
+    // —— ② 铸链：基线 + 短板拼成素材，走与灵感框同一条管线 ——
+    // classId 传 null：定标师的"建议归属"只是卷尾的一句话，归属由调度员独立裁定
+    // （建议与决定分开，与 draft 审核同一条哲学）。容量满档 —— 定标出的是正路，
+    // 不是回航那条最小恢复链。不走深度推演：那是灵感框里玩家自己勾的开关，
+    // 定标流程里没有这一格。
+    const idea = composeDiagnosisIdea(active.goalReframed, baseline);
+    const forged = await forgeChain({
+      idea,
+      classId: null,
+      deepDeliberation: false,
+      from: 'diagnosis',
+      capacity: 'full',
+    });
+    if (!forged.ok) return forged;
+
+    // —— ③ 落定：基线与链 id 一起写回（分开落会留下"判过分但没链"的中间态） ——
+    deps.mutate((s) => completeDiagnosis(s, baseline, forged.data.chainId as ChainId, now));
+
+    const done = deps.getState().diagnostics.history.at(-1);
+    if (done === undefined || done.status !== 'completed' || done.id !== active.id) {
+      return { ok: false, message: '这份定标没有落进档案，你看一眼「待议」有没有那条链。' };
+    }
+
+    return {
+      ok: true,
+      data: {
+        recordId: done.id,
+        chainId: forged.data.chainId,
+        classId: forged.data.classId,
+        stepCount: forged.data.stepCount,
+      },
+      // 两段都走真身才算 api —— 这里是**交集**语义，不能借 forgeChain 的
+      // mergeSource：它的口径是"任一棒走真身即 api"（链上的字只来自合并进去
+      // 的那几棒，所以那个口径是对的）。定标落了**两件可展示的东西** ——
+      // 基线卡上的读数与「待议」里的链 —— 任一件出自替身就把整次标成 api，
+      // 正是本仓库反复交过学费的那种"不会报错、只会让人误判的谎"。
+      source: gradingSource === 'api' && forged.source === 'api' ? 'api' : 'mock',
+      corrections: [...corrections, ...forged.corrections],
+    };
+  };
+
+  return {
+    forgeChain,
+    regenerateChain,
+    judgeTurnIn,
+    askAdvisor,
+    solveNetwork,
+    reroute,
+    designDiagnosis,
+    runDiagnosis,
+  };
 };
 
 export type Thunks = ReturnType<typeof createThunks>;

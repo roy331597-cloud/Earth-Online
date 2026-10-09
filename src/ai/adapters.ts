@@ -62,6 +62,12 @@ import type {
   ClassIdLiteral,
   Contact,
   ContactId,
+  DiagnosticBaseline,
+  DiagnosticDimension,
+  DiagnosticQuestion,
+  DiagnosticSheet,
+  DiagnosticSheetOutput,
+  DiagnosticVerdictOutput,
   Difficulty,
   DispatcherDecision,
   GoalId,
@@ -584,6 +590,234 @@ export const normalizeRerouteOutcome = (
         wanted > 0 && floor === 0
           ? '这一步已经在最低难度，无法再降；已保留原难度，只重写做法。'
           : null,
+    },
+    corrections,
+  };
+};
+
+// ---------------------------------------------------------------------------
+// 6. Diagnostician → 开局定标（两段式：出题收口 + 判分收口）
+// ---------------------------------------------------------------------------
+
+/**
+ * 卷子的数量口径（**适配层的收口，不是 schema 的硬拦**）。
+ *
+ * schema 留的是 1~12 的宽松界 —— 数量越界属于内容层的问题，该被修正，
+ * 不该把整卷（包括那句改写好的目标）拒掉降级。2026-10-07 事故的同一条教训：
+ * 一个词的毛病不该连坐整次调用。
+ */
+const DIAGNOSTIC_MAX_QUESTIONS = 5;
+/**
+ * 混合卷的配比下沿：1 道开放 + 2 道选择。缺哪一类，种子题顶上。
+ * 题量下沿（3）由这两条的**和**结构性保证 —— 补齐之后至少是 1+2，
+ * 不需要为它单设一道断言式的守卫。
+ */
+const DIAGNOSTIC_MIN_OPEN = 1;
+const DIAGNOSTIC_MIN_CHOICE = 2;
+
+/** 补齐用的种子题。泛用、不冒犯、当场答得完 —— 替身卷子上的那两道同源 */
+const SEED_OPEN_QUESTION: DiagnosticQuestion = {
+  id: '',
+  kind: 'open',
+  prompt: '用你自己的话说清现在的位置：这件事上你已经做到过什么、卡在哪里？',
+  options: [],
+};
+const SEED_CHOICE_QUESTIONS: DiagnosticQuestion[] = [
+  {
+    id: '',
+    kind: 'choice',
+    prompt: '过去一个月，你为这件事实际动手过几次？',
+    options: ['有几次，且留下了产物', '一两次，没留下什么', '想过，没动手'],
+  },
+  {
+    id: '',
+    kind: 'choice',
+    prompt: '现在最挡路的是哪一样？',
+    options: ['不知道从哪开始', '开始了但坚持不住', '在做，但看不出进步'],
+  },
+];
+
+export interface AdaptSheetContext {
+  /** 现有职业线名单（payload 里发给模型的那一份）。认不出的建议在这里被丢弃 */
+  knownClassIds: readonly string[];
+  /** 玩家写下的目标原话 —— 模型没写出改写稿时的兜底 */
+  goalRaw: string;
+}
+
+/**
+ * 出题段 → 落库的 `DiagnosticSheet`。
+ *
+ * 四件事，顺序不能换：
+ *   ① **建议归属过名单**。契约里 `suggestedClassIds` 是开放集合（撤 enum 的理由
+ *      同 GOAL_IDS：模型把「英语」写成 english 时，该丢的是那一个建议，不是整卷）；
+ *      认不认得由现有的线说了算。
+ *   ② **逐题清洗**：题面裁到契约上限、候选项去重截断；候选不足 2 个的选择题
+ *      转成开放题（题面本身还是一道好题，只是没法用选项作答）——
+ *      能修的就修，不丢整题。
+ *   ③ **题量收口**：最终落在 3~5 题、且至少 1 开放 + 2 选择。缺的用种子题补齐，
+ *      多的从尾部删（永远不删到配比下限之下）。
+ *   ④ **编号**：`q_1..q_n`。模型的输出里没有 id，而作答要按 id 指回来 ——
+ *      编号必须在**排序定稿之后**发生，否则 id 与实际顺序对不上。
+ */
+export const adaptDiagnosticSheet = (
+  out: DiagnosticSheetOutput,
+  ctx: AdaptSheetContext,
+): Adapted<DiagnosticSheet> => {
+  const corrections: string[] = [];
+
+  // —— ① 建议归属 ——
+  const legal = new Set(ctx.knownClassIds);
+  const suggestions: string[] = [];
+  const dropped: string[] = [];
+  for (const raw of out.suggestedClassIds) {
+    const id = raw.trim();
+    if (!legal.has(id)) dropped.push(id);
+    else if (!suggestions.includes(id)) suggestions.push(id);
+  }
+  if (dropped.length > 0) {
+    corrections.push(`建议归属 ${dropped.map((d) => `「${d}」`).join('')} 不在现有职业线名单内，已丢弃`);
+  }
+  if (suggestions.length > 3) {
+    suggestions.length = 3;
+    corrections.push('建议归属超过 3 条，已截到 3 条');
+  }
+
+  // —— ② 逐题清洗 ——
+  const cleaned: DiagnosticQuestion[] = [];
+  out.questions.forEach((q, i) => {
+    const prompt = clip(q.prompt, 200);
+    if (!prompt) {
+      corrections.push(`第 ${i + 1} 题没有题面，已丢弃`);
+      return;
+    }
+    const options = [...new Set(q.options.map((o) => clip(o, 60)).filter(Boolean))].slice(0, 4);
+    if (q.kind === 'choice' && options.length < 2) {
+      corrections.push(`第 ${i + 1} 题是选择题但候选不足 2 个，已转为开放题`);
+      cleaned.push({ id: '', kind: 'open', prompt, options: [] });
+      return;
+    }
+    cleaned.push({ id: '', kind: q.kind, prompt, options: q.kind === 'open' ? [] : options });
+  });
+
+  // —— ③ 配比与题量 ——
+  const live = {
+    open: cleaned.filter((q) => q.kind === 'open').length,
+    choice: cleaned.filter((q) => q.kind === 'choice').length,
+  };
+  if (live.open < DIAGNOSTIC_MIN_OPEN) {
+    cleaned.push({ ...SEED_OPEN_QUESTION });
+    live.open += 1;
+    corrections.push('开放题不足 1 道，已补一道种子题');
+  }
+  while (live.choice < DIAGNOSTIC_MIN_CHOICE) {
+    cleaned.push({ ...SEED_CHOICE_QUESTIONS[live.choice]! });
+    live.choice += 1;
+    corrections.push('选择题不足 2 道，已补一道种子题');
+  }
+  if (cleaned.length > DIAGNOSTIC_MAX_QUESTIONS) {
+    const original = cleaned.length;
+    const floor = { open: DIAGNOSTIC_MIN_OPEN, choice: DIAGNOSTIC_MIN_CHOICE };
+    let excess = cleaned.length - DIAGNOSTIC_MAX_QUESTIONS;
+    for (let i = cleaned.length - 1; i >= 0 && excess > 0; i--) {
+      const q = cleaned[i]!;
+      if (live[q.kind] <= floor[q.kind]) continue; // 下限之下不删
+      live[q.kind] -= 1;
+      cleaned.splice(i, 1);
+      excess -= 1;
+    }
+    corrections.push(`考卷出了 ${original} 道题，已截到 ${cleaned.length} 道`);
+  }
+
+  // —— ④ 编号 ——
+  const questions = cleaned.map((q, i) => ({ ...q, id: `q_${i + 1}` }));
+
+  // 目标改写是整张卷子的头。模型没写出来时退回玩家原话 ——
+  // 兜底用他自己的句子，比编一句"更好的目标"诚实得多。
+  const reframed = clip(out.goalReframed, 120);
+  if (!reframed) corrections.push('模型没写出改写后的目标，已退回你写的原话');
+
+  return {
+    value: {
+      goalReframed: reframed || clip(ctx.goalRaw, 120),
+      suggestedClassIds: suggestions,
+      questions,
+    },
+    corrections,
+  };
+};
+
+/**
+ * 判分段 → 落库的 `DiagnosticBaseline`。
+ *
+ * 与 `isUsableForge` 同一条降级哲学：**构不成基线时返回 null**，
+ * 让调用方走替身 —— 一条只有一个维度的"基线"没有比较的意义，
+ * 与其展示它，不如让玩家拿到替身那份诚实的卷面读数。
+ *
+ * 数值一律**收拢而不是拒收**：score 越界是模型的数值幻觉，
+ * `completeQuest` 对加成、`normalizeRerouteOutcome` 对奖励是同一手法 ——
+ * AI 的数值不能破坏系统，但也不该因此毁掉整份输出。
+ */
+export const adaptDiagnosticVerdict = (out: DiagnosticVerdictOutput): Adapted<DiagnosticBaseline | null> => {
+  const corrections: string[] = [];
+
+  const dimensions: DiagnosticDimension[] = [];
+  const seenKeys = new Set<string>();
+  for (const d of out.dimensions) {
+    const key = clip(d.key, 24);
+    const label = clip(d.label, 24);
+    if (!key || !label) {
+      corrections.push('有一个维度缺了 key 或名字，已丢弃');
+      continue;
+    }
+    if (seenKeys.has(key)) {
+      corrections.push(`维度 key「${key}」重复，已丢弃后来那条`);
+      continue;
+    }
+    seenKeys.add(key);
+    const score = Math.max(0, Math.min(100, Math.round(d.score)));
+    if (score !== d.score) corrections.push(`维度「${label}」的分 ${d.score} 越界，已收拢到 ${score}`);
+    dimensions.push({ key, label, score });
+  }
+  if (dimensions.length > 6) {
+    corrections.push(`维度给了 ${dimensions.length} 个，已截到 6 个`);
+    dimensions.length = 6;
+  }
+  if (dimensions.length < 2) {
+    return {
+      value: null,
+      corrections: [...corrections, `判分只给出 ${dimensions.length} 个维度，构不成基线`],
+    };
+  }
+
+  /** 短清单（strengths / gaps）：去空白、去重、裁长、封顶 4 条 */
+  const cleanList = (xs: readonly string[], where: string): string[] => {
+    const out: string[] = [];
+    for (const raw of xs) {
+      const t = clip(raw, 80);
+      if (!t) continue;
+      if (out.includes(t)) continue;
+      out.push(t);
+    }
+    if (out.length > 4) {
+      corrections.push(`${where}给了 ${out.length} 条，已截到 4 条`);
+      out.length = 4;
+    }
+    return out;
+  };
+
+  const levelLabel = clip(out.levelLabel, 40);
+  if (!levelLabel) corrections.push('判分没写位置标签，已用「起点已记录」顶上');
+
+  const summary = clip(out.summary, 240);
+  if (!summary) corrections.push('判分没写基线正文');
+
+  return {
+    value: {
+      levelLabel: levelLabel || '起点已记录',
+      summary,
+      dimensions,
+      strengths: cleanList(out.strengths, '已有的能力'),
+      gaps: cleanList(out.gaps, '短板'),
     },
     corrections,
   };

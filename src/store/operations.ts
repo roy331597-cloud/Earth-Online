@@ -30,10 +30,14 @@ import { mockForge } from '@/lib/mockForge';
 import { DEFAULT_REROUTE_REQUEST, mockReroute } from '@/lib/mockReroute';
 import { mockNetworkAdvisor, mockSocialSolver } from '@/lib/mockAdvisor';
 import { buildQuests } from '@/lib/questFactory';
+// 值导入（其余的契约类型走下面的 `import type`）：定标档案的环形上限
+import { DIAGNOSTICS_HISTORY_CAP } from '@/types';
 import type {
   AskNetworkAdvisor,
   AttachMilestoneSnapshot,
   AttributeDelta,
+  BeginDiagnosis,
+  CancelDiagnosis,
   CareerTrack,
   ChainId,
   ChapterId,
@@ -41,6 +45,8 @@ import type {
   CheckDaily,
   CheckWeekly,
   ClaimQuest,
+  CloseQuestChain,
+  CompleteDiagnosis,
   CompleteQuest,
   ConfirmQuestChain,
   ConsultNetworkSolver,
@@ -55,6 +61,9 @@ import type {
   DailyId,
   DailyLog,
   DateKey,
+  DiagnosticAnswer,
+  DiagnosticBaseline,
+  DiagnosticRecord,
   Difficulty,
   DismissChapterCeremony,
   EarthOnlineState,
@@ -91,6 +100,7 @@ import type {
   SolverConsultation,
   SpendAttributePoint,
   StartQuest,
+  SubmitDiagnosisAnswers,
   UsdCents,
   WeeklyDefinition,
   WeeklyId,
@@ -814,6 +824,8 @@ export const generateQuestChain: GenerateQuestChain = (state, input, now) => {
       reviewedAt: null,
     },
     completed: false,
+    // 刚铸出来的链当然没有被收束过（收束是玩家的动作，见 CloseQuestChain）
+    closedAt: null,
   };
 
   const byId = { ...state.quests.byId };
@@ -1726,27 +1738,45 @@ export const successorOf = (state: EarthOnlineState, chainId: string, index: num
   ) ?? null;
 
 /**
+ * 「换个做法」适用的四种状态（Phase 7 起含在手的两种）。
+ * 导出是为了让 thunks 的入口守卫**照抄同一份** —— 两处各写一份数组，
+ * 改一处漏一处的那天，界面上会多出一颗点了没反应的按钮。
+ */
+export const REROUTABLE_STATUSES: ReadonlyArray<Quest['status']> = [
+  'draft',
+  'offered',
+  'claimed',
+  'active',
+];
+
+/** 这一步现在能不能换做法（守卫的布尔版，入口检查与落库检查共用同一份口径） */
+export const isReroutable = (quest: Quest): boolean => REROUTABLE_STATUSES.includes(quest.status);
+
+/**
  * 「换个做法」：把某一步重写成一条更可行、但更便宜的做法。
  *
  * 形状 B 的落地（见 docs/phase2/reroute-design.md §3.1）。五步：
  *
- *   ① 只对**链式任务**开放（draft 或 offered）。reroute 的存在意义是
- *      "这一步通不到下一步"，而单条任务没有下一步 —— 对它，玩家该用的是打回。
- *      轮 C 起一条线确认后只有第一步被揭开，后面的步骤会在**已过审但还没轮到**
- *      的处境里发现"这步我做不了"—— 所以 offered 也要能换法，否则玩家只能
- *      先领取再打回，比换法多绕一圈。
+ *   ① 只对**链式任务**开放（draft / offered / claimed / active 四态）。
+ *      reroute 的存在意义是"这一步通不到下一步"，而单条任务没有下一步 ——
+ *      对它，玩家该用的是打回。轮 C 起一条线确认后只有第一步被揭开，后面的
+ *      步骤会在**已过审但还没轮到**的处境里发现"这步我做不了"—— 所以 offered
+ *      也要能换法。Phase 7（事故③尾巴）再把 claimed / active 收进来：领了、
+ *      甚至做了一半才发现这步不对，是真实发生的事 —— 此前玩家只能先放弃再绕路。
+ *      turn_in_pending 不在列：那一步已经在结算里，先结掉它，才有"做法"可谈。
  *   ② 额度来自 `ChainReview.rerouteCount`（链级软上限 2 次）。
  *   ③ 让 mockReroute 生成替换件（Phase 4 换成模型，见该文件顶部的删除标记）。
  *      两条红线在那边落地：降难度必降奖励、必带后继的 objective 原文。
- *   ④ 旧任务 `draft/offered -> rerouted` 留档，**不删**。
- *   ⑤ 新任务落回同一条链的同一个 index，**继承原状态** ——
- *      草稿换出草稿（还要过一次审核），已过审换出已过审（直接可用）。
+ *   ④ 旧任务 `draft/offered/claimed/active -> rerouted` 留档，**不删**。
+ *   ⑤ 新任务落回同一条链的同一个 index，**继承原状态与时刻** ——
+ *      草稿换出草稿（还要过一次审核），已过审换出已过审（直接可用），
+ *      在手的换出在手的（claimedAt / startedAt 原样接回）。
  *
  * ⚠️ 与 mockForge 那一行一样：Phase 4 换真身时改的是 `mockReroute` 这一行调用。
  */
 export const rerouteQuestDraft: RerouteQuestDraft = (state, questId, request, now, forgedOutcome) => {
   const quest = state.quests.byId[questId];
-  if (!quest || (quest.status !== 'draft' && quest.status !== 'offered')) return state;
+  if (!quest || !isReroutable(quest)) return state;
 
   const membership = quest.chain;
   if (!membership) return state; // ② 单任务没有"下一步"，不适用
@@ -1795,11 +1825,17 @@ export const rerouteQuestDraft: RerouteQuestDraft = (state, questId, request, no
 
   // 前置是"这一步之前的那些步骤"，与做法无关 —— 原样继承。
   // （buildQuests 拿到的 prerequisiteTempIds 是空的：替换件的草稿里没有同批次的兄弟。）
-  // 状态也原样继承：buildQuests 铸出来的永远是 draft，这里把「已过审」的那半边补回去。
+  // 状态原样继承：buildQuests 铸出来的永远是 draft，这里把另外三态补回去 ——
+  // 草稿换出草稿、已过审换出已过审、在手的换出在手的。
+  // 在手的两种还要把**时刻**接回来：claimedAt / startedAt 记的是"玩家什么时候接的、
+  // 什么时候开始做的"，换的是做法，不是这段进度。turnInOpenedAt 刻意不接：
+  // 能走到这里的任务没有进过结算（turn_in_pending 被守卫挡在外面），它必是 null。
   const newQuest: Quest = {
     ...replacement,
+    status: quest.status,
     prerequisiteQuestIds: [...quest.prerequisiteQuestIds],
-    ...(quest.status === 'offered' ? { status: 'offered' as const } : {}),
+    claimedAt: quest.claimedAt,
+    startedAt: quest.startedAt,
   };
 
   const byId: Record<QuestId, Quest> = {
@@ -1996,6 +2032,225 @@ export const chainsAwaitingRegeneration = (
     });
   }
   return out;
+};
+
+// ===========================================================================
+// Phase 7 · 收束：主动提前结链（「停止也是完成」）
+// ===========================================================================
+
+/**
+ * 收束一条线：玩家说"到此为止" —— 在它走完之前。
+ *
+ * 这不是失败。一条线的价值不只由"走完"兑换：走了一半发现自己成了另一个人、
+ * 目标变了、或者这条线已经给了你它该给的东西 —— 这些都是成立的停点。
+ * 收束让"停止"也拥有一个体面的落点，而不是让那条线永远以半开的状态
+ * 挂在存档里，用每一张卡片提醒玩家他"还没做完"。
+ *
+ * 与「走完」（`completed`）是两条轨道，别混淆：
+ *   - 走完是**派生事实**：completeQuest 在全员 completed 时置真，机器判定；
+ *   - 收束是**动作记录**：本函数写 `closedAt`，`completed` 保持 false。
+ * 收官界面的两态文案就按这两个字段判（见 types/quest.ts 的 closedAt 注释）。
+ *
+ * 三条守卫，各自对应一句拒绝的理由（UI 侧先问 `canCloseQuestChain` 再亮按钮）：
+ *   · 链不存在        —— 无事可做，原引用返回；
+ *   · 已经走完        —— 走完的线不需要收束，收官文案已经写好了；
+ *   · 有一步在结算里  —— 「先把手头那步结掉」。那一步的结算面板还开着，
+ *                        此时把它转 abandoned，玩家手里的面板会指向一条废数据。
+ *
+ * 成员的处理按状态分三类：
+ *   · draft / offered / claimed / active → `abandoned`（该状态第一次有写入方）
+ *     并进 `archivedIds`、退出 `order`（与 regenerateQuestChain 的归档同一套走法）；
+ *   · completed → 原样留在 byId 与 order 里 —— 走过的路是历史，收束不改写历史，
+ *     它们仍会被 lastCompletionAt 等"动过没有"的判据读到；
+ *   · rejected / rerouted → 原样。它们本来就是留档态，不需要再盖章。
+ */
+export const closeQuestChain: CloseQuestChain = (state, chainId, now) => {
+  const chain = state.quests.chains[chainId];
+  if (!chain) return state;
+  if (chain.completed) return state;
+
+  const members = membersOfChain(state, chainId);
+  if (members.some((m) => m.status === 'turn_in_pending')) return state;
+
+  const byId = { ...state.quests.byId };
+  const archived: QuestId[] = [];
+  for (const m of members) {
+    if (m.status !== 'draft' && m.status !== 'offered' && m.status !== 'claimed' && m.status !== 'active') continue;
+    byId[m.id] = { ...m, status: 'abandoned' };
+    archived.push(m.id);
+  }
+  const archivedSet = new Set(archived);
+
+  return {
+    ...state,
+    quests: {
+      ...state.quests,
+      byId,
+      order: state.quests.order.filter((id) => !archivedSet.has(id)),
+      archivedIds: [...state.quests.archivedIds, ...archived],
+      chains: { ...state.quests.chains, [chainId]: { ...chain, closedAt: iso(now) } },
+    },
+  };
+};
+
+/**
+ * 这条线现在能不能收束 —— **纯查询，不改状态**（与 milestoneGate 同一个理由：
+ * operation 在拒绝路径上只返回原状态，"为什么这颗按钮是灰的"必须另有出口）。
+ *
+ * 判据与 `closeQuestChain` 的三条守卫**逐条对应**，两处若有一处漂移，
+ * 界面就会长出一颗点了没反应的按钮。
+ */
+export type CloseChainGate =
+  | { ok: true }
+  | { ok: false; reason: 'not_found' | 'completed' | 'turn_in_pending'; detail: string };
+
+export const canCloseQuestChain = (state: EarthOnlineState, chainId: string): CloseChainGate => {
+  const chain = state.quests.chains[chainId];
+  if (!chain) return { ok: false, reason: 'not_found', detail: '这条线不在了' };
+  if (chain.completed) return { ok: false, reason: 'completed', detail: '这条线已经走完了 —— 去翻收官就好' };
+  if (membersOfChain(state, chainId).some((m) => m.status === 'turn_in_pending')) {
+    return { ok: false, reason: 'turn_in_pending', detail: '有一笔结算还没提交 —— 先把手头那步结掉，再谈收束' };
+  }
+  return { ok: true };
+};
+
+// ===========================================================================
+// Phase 7 · 开局定标（先量起点，再谈走多远）
+// ===========================================================================
+//
+// 一条四步的状态机：起卷 → 交卷 → 判分落定 / 随时放弃。
+// 中间态（awaiting_answers）**必须进存档** —— 卷子和作答之间隔着一次 AI 调用
+// 加一段真人写字的时间，任何一步刷新都不该让玩家从头再来（先例：openTurnIn
+// 的 turn_in_pending）。四个函数各自守着自己的边界，拒绝路径一律原引用返回。
+//
+// 与 AI 的接缝在 thunks 层（designDiagnosis / runDiagnosis）：这里不碰模型，
+// 只把"已经发生的事"安放进状态机 —— 考卷由 thunk 出好再递进来（beginDiagnosis
+// 的 sheet），判分与铸链的产物由 thunk 拼好再递进来（completeDiagnosis 的
+// baseline + chainId）。铸造 ≠ 生效这条规则在这里没有被松动：铸链产物照旧全部
+// 落在 draft 待议，定标没有给 AI 开后门。
+
+/**
+ * 起卷：把玩家的目标原话与一份**已收口的考卷**落成进行中的记录。
+ *
+ * 两条守卫：目标为空、或卷面一道题都没有 → 原引用返回。
+ * 出题失败时压根不该走到这里 —— 没有卷子就没有记录，刷新不会留下一条
+ * "空卷"让玩家对着发呆。
+ *
+ * 已有进行中的定标时**覆盖**为新的这一次：起卷是玩家的明确动作（他要重来），
+ * 旧卷的放弃该走 cancelDiagnosis 归档，不该在这里被静默吞掉 —— UI 层负责
+ * 在覆盖之前先劝一句。
+ */
+export const beginDiagnosis: BeginDiagnosis = (state, goalRaw, sheet, now) => {
+  const goal = goalRaw.trim();
+  if (goal.length === 0) return state;
+  if (sheet.questions.length === 0) return state;
+
+  const record: DiagnosticRecord = {
+    // 与 createContact 的 c_ 同一套写法（时间戳 36 进制 + 计数后缀）：
+    // 同一毫秒内起两次卷时，时间戳会撞，计数后缀把它岔开
+    id: `diag_${now.getTime().toString(36)}_${state.diagnostics.history.length}`,
+    createdAt: iso(now),
+    status: 'awaiting_answers',
+    goalRaw: goal,
+    goalReframed: sheet.goalReframed,
+    // 拷一层再入档：入参是 thunk 递进来的一包东西，与存档之间只许值相同、
+    // 不许引用相同（本文件的自律 ②，也是 mock 模板不被污染的那道保证）
+    suggestedClassIds: [...sheet.suggestedClassIds],
+    questions: sheet.questions.map((q) => ({ ...q, options: [...q.options] })),
+    answers: [],
+    baseline: null,
+    chainId: null,
+    cancelledAt: null,
+  };
+
+  return { ...state, diagnostics: { ...state.diagnostics, active: record } };
+};
+
+/**
+ * 交卷：把作答写进进行中的记录（status 保持 awaiting_answers）。
+ *
+ * 判分是紧随其后的另一次调用 —— 交完卷到判分回来之间刷新页面，
+ * 该看到的是自己刚写下的答案，不是一张空白卷。
+ *
+ * 没有进行中的记录、或记录已结束 → 原引用返回。
+ * 重复交卷（awaiting_answers 期间再次调用）**允许覆盖** —— 玩家在判分回来前
+ * 想再改一版是正当的，且覆盖掉的那一版没有别的消费者。
+ *
+ * 签名里没有 `now`：记录形状里没有"交卷时刻"这一格（见 types/diagnostics.ts），
+ * 少一个用不上的参数，比留一个摆设诚实。
+ */
+export const submitDiagnosisAnswers: SubmitDiagnosisAnswers = (state, answers) => {
+  const active = state.diagnostics.active;
+  if (active === null || active.status !== 'awaiting_answers') return state;
+
+  return {
+    ...state,
+    diagnostics: {
+      ...state.diagnostics,
+      active: {
+        ...active,
+        answers: answers.map((a: DiagnosticAnswer) => ({ questionId: a.questionId, text: a.text })),
+      },
+    },
+  };
+};
+
+/** 把记录归档：追加进 history 并按环形上限裁最旧（与其它历史记录同哲学） */
+const archiveDiagnosis = (state: EarthOnlineState, record: DiagnosticRecord): DiagnosticRecord[] =>
+  [...state.diagnostics.history, record].slice(-DIAGNOSTICS_HISTORY_CAP);
+
+/**
+ * 落定：写基线、回填链 id、把记录归档进 history（status → completed）。
+ *
+ * 基线与 chainId **一起**落：铸链排在判分之后（见 ai/thunks 的 runDiagnosis）——
+ * 判分出短板 → 短板拼进 idea → forgeChain 铸出链 id → 到这里一次性写回。
+ * 分开落的话，中间那次刷新会留下一条"判过分但没链"的记录，而玩家没法补。
+ *
+ * 没有进行中的记录 → 原引用返回（判分回来时玩家已经放弃，这是正常结局，
+ * 不是错误 —— 那份基线就丢掉，静默）。同样没有 `now`：记录形状里
+ * 完成时刻就是 createdAt 的那一次定标，不另立一格。
+ */
+export const completeDiagnosis: CompleteDiagnosis = (state, baseline: DiagnosticBaseline, chainId) => {
+  const active = state.diagnostics.active;
+  if (active === null || active.status !== 'awaiting_answers') return state;
+
+  const record: DiagnosticRecord = {
+    ...active,
+    status: 'completed',
+    baseline,
+    chainId,
+  };
+
+  return {
+    ...state,
+    diagnostics: {
+      ...state.diagnostics,
+      active: null,
+      history: archiveDiagnosis(state, record),
+    },
+  };
+};
+
+/**
+ * 放弃：把进行中的记录以 cancelled 归档，卷面清空。
+ *
+ * 随时可退是这条流程的底线 —— 定标是邀请，不是关卡。
+ * 没有进行中的记录 → 原引用返回（没有可放弃的东西，不算一次"放弃"）。
+ */
+export const cancelDiagnosis: CancelDiagnosis = (state, now) => {
+  const active = state.diagnostics.active;
+  if (active === null) return state;
+
+  const record: DiagnosticRecord = { ...active, status: 'cancelled', cancelledAt: iso(now) };
+
+  return {
+    ...state,
+    diagnostics: {
+      ...state.diagnostics,
+      active: null,
+      history: archiveDiagnosis(state, record),
+    },
+  };
 };
 
 // ===========================================================================

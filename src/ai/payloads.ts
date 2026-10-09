@@ -39,10 +39,15 @@ import type {
   ClassIdLiteral,
   Contact,
   ContactContextForAI,
+  DiagnosticAnswer,
+  DiagnosticQuestion,
+  DiagnosticSheetInput,
+  DiagnosticVerdictInput,
   DispatcherDecision,
   DispatcherInput,
   EarthOnlineState,
   EmotionTag,
+  ForgeCapacity,
   NetworkAdviceInput,
   Quest,
   SolverConsultInput,
@@ -74,14 +79,14 @@ const chapterTone = (state: EarthOnlineState): string =>
  *
  * ⚠️ 这一段是**防幻觉的**，不是背景介绍。契约里 `primaryClass` 是个字符串，
  *    模型完全可以顺着语义编一条"数据科学家"出来 —— 除非它手里有一份
- *    "目前只有这四条线"的清单，而且被明确告知只能从里面挑。
+ *    "目前只有这五条线"的清单，而且被明确告知只能从里面挑。
  *    清单里带上等级，还顺带解决了另一个问题：它会倾向于把想法归到玩家
  *    正在走的路上，而不是每来一个新想法就另起一条线。
  */
 const classCatalogForAI = (
   state: EarthOnlineState,
 ): DispatcherInput['existingClasses'] =>
-  (['computational_biology', 'investor', 'social_media_influencer', 'startup_entrepreneur'] as ClassIdLiteral[])
+  (['computational_biology', 'investor', 'social_media_influencer', 'startup_entrepreneur', 'english_learner'] as ClassIdLiteral[])
     .map((classId) => getClass(classId))
     .filter((c): c is NonNullable<typeof c> => c !== undefined)
     .map((c) => ({
@@ -93,12 +98,15 @@ const classCatalogForAI = (
 
 export const buildDispatcherPayload = (
   state: EarthOnlineState,
-  input: { idea: string; deepDeliberation: boolean },
+  input: { idea: string; deepDeliberation: boolean; capacity?: ForgeCapacity },
 ): DispatcherInput => {
   const chapter = getChapter(state.chapters.focusedChapterId);
   return {
     rawIdea: input.idea,
     deepDeduction: input.deepDeliberation,
+    // 容量档走显式字段（不拼进 rawIdea —— 拼接会污染 sourceIdea 与链标题兜底文案）。
+    // 不传时按满档 —— 存量调用零破坏（既有的三处入口都没传）。
+    capacity: input.capacity ?? 'full',
     preferredShape: 'chain',
     existingClasses: classCatalogForAI(state),
     currentChapter: {
@@ -121,7 +129,7 @@ export const buildDispatcherPayload = (
 
 export const buildClassPayload = (
   state: EarthOnlineState,
-  input: { classId: ClassIdLiteral; idea: string; decision: DispatcherDecision },
+  input: { classId: ClassIdLiteral; idea: string; decision: DispatcherDecision; capacity?: ForgeCapacity },
   now: Date,
 ): ClassAgentInput => {
   const entry = getClass(input.classId);
@@ -137,6 +145,8 @@ export const buildClassPayload = (
 
   return {
     rawIdea: input.idea,
+    // 与 dispatcher 同源透传（见 buildDispatcherPayload 的注释）
+    capacity: input.capacity ?? 'full',
     dispatch: {
       intentSummary: input.decision.intentSummary,
       questShape: input.decision.questShape,
@@ -290,7 +300,7 @@ const relatedClassesOf = (c: Contact): ClassIdLiteral[] => {
     .toLowerCase();
 
   const hits: ClassIdLiteral[] = [];
-  for (const classId of ['computational_biology', 'investor', 'social_media_influencer', 'startup_entrepreneur'] as ClassIdLiteral[]) {
+  for (const classId of ['computational_biology', 'investor', 'social_media_influencer', 'startup_entrepreneur', 'english_learner'] as ClassIdLiteral[]) {
     const entry = getClass(classId);
     if (!entry) continue;
     // domains 是英文领域词（'bioinformatics'、'venture capital'…），
@@ -451,7 +461,57 @@ export const buildReroutePayload = (
 });
 
 // ---------------------------------------------------------------------------
-// 7. 一些小工具（给 thunks 层用，也是纯的）
+// 7. Diagnostician（开局定标 · 两段）
+// ---------------------------------------------------------------------------
+
+/**
+ * 出题段的输入。
+ *
+ * `existingClasses` 与调度员拿到的是**同一份名单**（`classCatalogForAI`）——
+ * 定标师那句"建议归属"要能接回真实的线，名单少一条，它就少一个可选项，
+ * 而它并不会因此不说话，只会去猜。防幻觉的清单要么完整，要么形同虚设。
+ */
+export const buildDiagnosticSheetPayload = (
+  state: EarthOnlineState,
+  input: { goalRaw: string },
+): DiagnosticSheetInput => ({
+  goalRaw: input.goalRaw,
+  playerSnapshot: {
+    level: portfolioLevel(state),
+    energy: state.player.energy.current,
+  },
+  existingClasses: classCatalogForAI(state).map((c) => ({
+    classId: c.classId,
+    displayName: c.displayName,
+  })),
+});
+
+/**
+ * 判分段的输入。
+ *
+ * `questions` 带上 id：玩家的作答按 `questionId` 对上，而卷子是模型自己出的 ——
+ * 不把卷子原文还给它，它就只能在"盲盒里"判分（不知道每道题的候选是什么）。
+ * 两段之间隔着真人作答，所以这是**两次独立调用**，不是一次调用里的两轮。
+ */
+export const buildDiagnosticVerdictPayload = (
+  state: EarthOnlineState,
+  sheet: { goalReframed: string; questions: DiagnosticQuestion[] },
+  input: { goalRaw: string; answers: DiagnosticAnswer[] },
+): DiagnosticVerdictInput => ({
+  goalRaw: input.goalRaw,
+  goalReframed: sheet.goalReframed,
+  questions: sheet.questions.map((q) => ({
+    id: q.id,
+    kind: q.kind,
+    prompt: q.prompt,
+    options: [...q.options],
+  })),
+  answers: input.answers.map((a) => ({ questionId: a.questionId, text: a.text })),
+  playerSnapshot: { level: portfolioLevel(state) },
+});
+
+// ---------------------------------------------------------------------------
+// 8. 一些小工具（给 thunks 层用，也是纯的）
 // ---------------------------------------------------------------------------
 
 /** 该职业线的升级门槛，用于把"还要多久升级"讲给模型听 */

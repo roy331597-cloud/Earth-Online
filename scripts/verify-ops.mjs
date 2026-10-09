@@ -26,6 +26,11 @@
 //   ㊱ 云同步原语（口令 → 钥匙 → 密文）  ㊲ 云同步协议（假服务器走穿全流程）
 //   ㊳ 云同步端到端（起一台**真服务器**，与真客户端对穿）
 //   ㊴ 任务链口径一致（提示词 / schema / 代码三处对得上）
+//   ㊹ 英语线挂载（目录 / 提示词三表 / 花名册 / payloads / 路由 / 目标挂靠）
+//   ㊶ 三档容量与回航（capacity 透传 / schema 下沿 3 / isStalled 三边界 / 回航素材）
+//   ㊷ 收束与收官（三守卫 / 成员搁下归档 / closedAt 与 completed 两轨 / 收官渲染接线）
+//   ㊸ 单步打回（执行中四态可换 / 进度继承 / 四选一原因 / 提示词与 UI 接线）
+//   ㊵ 开局定标（两段式收口 / 卷面落档 / 基线与链一起落 / 双轨道端到端 / 降级留痕）
 //
 // ①–⑨ 验的是**写**（状态怎么流转）；⑩–⑬ 验的是**读**（selector 从状态里读出什么）。
 // 读错了不抛异常，只会安静地显示一个错的东西 —— 所以更值得钉住。
@@ -189,7 +194,8 @@ try {
   const { createMockState } = await server.ssrLoadModule('/src/store/mockState.ts');
   const {
     checkDaily, startQuest, openTurnIn, completeQuest, claimQuest, reviewQuestDraft, generateQuestChain,
-    confirmQuestChain, rejectQuestChain, successorOf,
+    confirmQuestChain, rejectQuestChain, successorOf, REROUTABLE_STATUSES, isReroutable,
+    closeQuestChain, canCloseQuestChain,
   } = await server.ssrLoadModule('/src/store/operations.ts');
   const { mockArbiter, toTurnInInput } = await server.ssrLoadModule('/src/lib/mockArbiter.ts');
   const { localDateKey } = await server.ssrLoadModule('/src/lib/format.ts');
@@ -1056,6 +1062,12 @@ try {
   // v7 换的是"精确等于旧默认值"的那份模型名 —— 按史实把这份老档的模型
   // 填回旧默认，下面"默认值换代"那条断言才有东西可对质
   legacy.ai.model = 'deepseek-chat';
+  // v8 才有的两样：链的 closedAt 与顶层 diagnostics 容器 —— 老档里都不存在。
+  // 其中一条链按史实改成"已经走完"（completed），用来对质"走完 ≠ 收束"：
+  // 迁移不许把 completed 悄悄翻成一次 closedAt 动作。
+  delete legacy.diagnostics;
+  for (const c of Object.values(legacy.quests.chains)) delete c.closedAt;
+  legacy.quests.chains['ch_repro_dignity'].completed = true;
 
   const migrated = decodeSave(encodeSave(legacy), CURRENT_SCHEMA_VERSION, MIGRATIONS, MIG_NOW);
   truthy('v1 老档 → 迁移成功，而不是分流', migrated.save);
@@ -1134,6 +1146,19 @@ try {
   const keptModel = decodeSave(encodeSave(customModel), CURRENT_SCHEMA_VERSION, MIGRATIONS, MIG_NOW);
   check('不是旧默认值的模型名（谁挑过的）不许被默认值换代顶掉',
     keptModel.save.ai.model, 'deepseek-reasoner');
+  // v7 → v8：链补 closedAt、顶层补 diagnostics。补的都是**空** ——
+  // 老档里没有人收束过链、没有人被定标过；补一个收束时刻或一份基线，
+  // 就是在档案里写一句玩家从没做过的事（与 v6 不补造成就日期同一条纪律）。
+  check('v7 老档的每条链补 closedAt: null（收束是动作，没发生过就不能造）',
+    Object.values(migrated.save.quests.chains).map((c) => c.closedAt), [null, null]);
+  check('走完的链不被迁移改成"收束"（completed 原样：true 仍是 true，closedAt 仍是 null）',
+    Object.values(migrated.save.quests.chains).map((c) => [c.completed, c.closedAt]),
+    [[true, null], [false, null]]);
+  check('v7 老档补 diagnostics 空容器（没有进行中的卷，也没有任何一份基线档案）',
+    [migrated.save.diagnostics.active, migrated.save.diagnostics.history], [null, []]);
+  check('链的其余字段一字不动（迁移只补 closedAt 一格）',
+    Object.values(migrated.save.quests.chains).map((c) => c.title),
+    Object.values(legacy.quests.chains).map((c) => c.title));
 
   // "只补数据，不搬立场"：迁移不借机改写玩家的记录 —— 拿一条旧任务的标题对质
   check('不搬动已有数据：任务标题原样', migrated.save.quests.byId['q_cb_repro_figure'].title, '复现一张图的尊严');
@@ -1528,15 +1553,17 @@ try {
     ).ratio,
     1,
   );
+  // 英语线（Phase 7）2026-10-09 加入：int 0.25 / cha 0.25 —— 权重表从 mockState
+  // 的五条轨迹现读，这两条期望值因此跟着第 5 线一起长了一格
   check(
-    '权重从职业线现读：智识关联三条线，按高→低（不是 catalog 硬编码）',
+    '权重从职业线现读：智识关联四条线，按高→低（不是 catalog 硬编码）',
     rows.find((r) => r.key === 'int').weights.map((w) => [w.classId, w.weight]),
-    [['computational_biology', 0.4], ['social_media_influencer', 0.2], ['investor', 0.15]],
+    [['computational_biology', 0.4], ['english_learner', 0.25], ['social_media_influencer', 0.2], ['investor', 0.15]],
   );
   check(
-    '魅力的权重来自两条"对外"的线',
+    '魅力的权重来自三条"对外"的线',
     rows.find((r) => r.key === 'cha').weights.map((w) => [w.classId, w.weight]),
-    [['social_media_influencer', 0.4], ['startup_entrepreneur', 0.3]],
+    [['social_media_influencer', 0.4], ['startup_entrepreneur', 0.3], ['english_learner', 0.25]],
   );
 
   // -------------------------------------------------------------------------
@@ -1851,7 +1878,7 @@ try {
   const { mockForge } = await server.ssrLoadModule('/src/lib/mockForge.ts');
   const seedTitles = (c) => c.seedQuests.map((s) => s.title);
   check(
-    '目录：四条职业线的种子池都 ≥8 条（重抽要有fresh的可抽）',
+    '目录：每条职业线的种子池都 ≥8 条（重抽要有 fresh 的可抽）',
     CLASSES.every((c) => c.seedQuests.length >= 8),
     true,
   );
@@ -1935,7 +1962,19 @@ try {
   const rrStep = rr.quests.byId[rrChain.questIds[0]];
   const rrStepIdx = rrChain.questIds.indexOf(rrStep.id);
 
-  check('既不是草稿也不是待领取 → 原对象返回（进行中的任务不能偷偷换掉）', rerouteQuestDraft(rr, 'q_cb_docker', '换一个', NET_NOW) === rr, true);
+  check(
+    '已完结的那一步 → 原对象返回（换法只发生在还活着的步骤上）',
+    rerouteQuestDraft(rr, 'q_cb_repro_figure', '想重来', NET_NOW) === rr,
+    true,
+  );
+  // ⚠️ Phase 7 反转：这一条此前钉的是"进行中的任务不能偷偷换掉"的旧行为。
+  //    执行中单步打回（事故③尾巴）落地后，active 恰恰是要能换的四态之一 ——
+  //    旧断言连同它的行为一起退休了。
+  check(
+    '执行中的那一步也能换做法（Phase 7：draft / offered / claimed / active 四态可换）',
+    rerouteQuestDraft(rr, 'q_cb_docker', '换一个', NET_NOW) !== rr,
+    true,
+  );
 
   const rrNew = rerouteQuestDraft(rr, rrStep.id, '  这一步我做不动，换成先写一页  ', NET_NOW);
   const rrNewId = rrNew.quests.chains[rrChain.id].questIds[rrStepIdx];
@@ -2002,9 +2041,23 @@ try {
   );
   check('换过之后它仍在板上（替换件继承的是"现在就能接"这件事）', claimableQuests(rrOpen).map((q) => q.id), [rrOpenNew.id]);
 
-  // 反证：已经领到手上的那一步不许再换 —— 换法只发生在"还没动手"的时候
+  // ⚠️ Phase 7 反转（此前的反证是"已经领到手上的那一步不许再换"）：
+  //    领了也能换 —— 替换件**继承进度**，状态仍是 claimed，claimedAt 原样接回。
+  //    完整矩阵（含 active 继承 startedAt、turn_in_pending 被拒）在 ㊸ 一节。
   const rrHanded = claimQuest(rrOpen, rrOpenNew.id, NET_NOW);
-  check('已领取的那一步 → 原对象返回', rerouteQuestDraft(rrHanded, rrOpenNew.id, '又要换', NET_NOW) === rrHanded, true);
+  const rrHandedNew = rerouteQuestDraft(rrHanded, rrOpenNew.id, '领了才发现不对，换一版', NET_NOW);
+  const rrHandedNewId = rrHandedNew.quests.chains[rrChain.id].questIds[rrStepIdx];
+  check(
+    '已领取的那一步也能换做法，替换件继承 claimed 与 claimedAt（进度不清零）',
+    [
+      rrHandedNew !== rrHanded,
+      rrHandedNew.quests.byId[rrHandedNewId].status,
+      rrHandedNew.quests.byId[rrHandedNewId].claimedAt,
+      rrHandedNew.quests.byId[rrHandedNewId].startedAt,
+      rrHanded.quests.byId[rrOpenNew.id].claimedAt !== null,
+    ],
+    [true, 'claimed', rrHanded.quests.byId[rrOpenNew.id].claimedAt, null, true],
+  );
 
   // -------------------------------------------------------------------------
   console.log('\n【㉓ 存档：导出 → 导入的无损往返】');
@@ -4482,7 +4535,7 @@ try {
   const cleanNowIso = CLEAN_NOW.toISOString();
 
   // —— ① 结构完整 ——
-  check('四条职业线全在场，全部停在 Lv.1 / 0 EXP / 0 完成 / 无链',
+  check('五条职业线全在场，全部停在 Lv.1 / 0 EXP / 0 完成 / 无链',
     cleanState.careers.tracks.map((t) => [t.level, t.exp, t.stats.questsCompleted, t.chainIds.length]),
     CLASSES.map(() => [1, 0, 0, 0]));
   check('空档没有"正在走的线"（activeClassId 为 null，交给选择器回退）',
@@ -4505,11 +4558,11 @@ try {
      cleanState.evolution.stats.litNodeCount,
      Object.values(cleanState.evolution.stats.branchProgress).every((v) => v === 0)],
     [EV_NODES.length, 0, 0, true]);
-  check('出厂花名册九位都在（调度 / 四职业 / 蓝图 / 智囊 / 判官 / 审核官）',
+  check('出厂花名册十一位都在（调度 / 五职业 / 蓝图 / 智囊 / 判官 / 审核官 / 定标师）',
     cleanState.agents.records.map((a) => a.id),
     ['agent_dispatcher', 'agent_class_compbio', 'agent_class_investor', 'agent_class_influencer',
-     'agent_class_entrepreneur', 'agent_blueprints', 'agent_network_advisor', 'agent_arbiter',
-     'agent_chain_reviewer']);
+     'agent_class_entrepreneur', 'agent_class_english', 'agent_blueprints', 'agent_network_advisor',
+     'agent_arbiter', 'agent_chain_reviewer', 'agent_diagnostician']);
   check('但每一位的账都是零（mock 里那条"被调用过 6 次"只属于 mock）',
     [cleanState.agents.records.every((a) => a.stats.invocations === 0 && a.stats.costUsdCents === 0
       && a.stats.lastInvokedAt === null),
@@ -4558,12 +4611,13 @@ try {
   check('口号是空的（旧 mock 里那句话是给截图看的）', cleanState.player.motto, '');
   check('体力满格开场（80/80）',
     [cleanState.player.energy.current, cleanState.player.energy.max], [80, 80]);
-  check('其余的"有记录"容器全部为空',
+  check('其余的"有记录"容器全部为空（含开局定标：没有进行中的卷、没有一份基线档案）',
     [cleanState.quests.order.length, Object.keys(cleanState.quests.byId).length,
      Object.keys(cleanState.quests.chains).length, cleanState.journal.entries.length,
      cleanState.milestones.records.length, Object.keys(cleanState.milestones.counters).length,
-     cleanState.events.length, cleanState.evolution.techMilestones.length],
-    [0, 0, 0, 0, 0, 0, 0, 0]);
+     cleanState.events.length, cleanState.evolution.techMilestones.length,
+     cleanState.diagnostics.active, cleanState.diagnostics.history.length],
+    [0, 0, 0, 0, 0, 0, 0, 0, null, 0]);
   check('徽记与待看队列从空开始（成就引擎在第一次写入时现算）',
     [cleanState.unlockables.achievementIds.length, cleanState.unlockables.pendingAchievementIds.length,
      cleanState.unlockables.easterEggIds.length],
@@ -5434,20 +5488,20 @@ try {
   const requiredPrompts = [
     '00-shared-context.md', '10-dispatcher.md', '20-class-computational-biology.md',
     '21-class-investor.md', '22-class-influencer.md', '23-class-entrepreneur.md',
-    '24-class-blueprint-generator.md', '30-network-advisor.md', '40-arbiter.md',
-    '50-chain-reviewer.md', '60-reroute.md',
+    '24-class-blueprint-generator.md', '25-class-english.md', '30-network-advisor.md',
+    '40-arbiter.md', '50-chain-reviewer.md', '60-reroute.md', '70-diagnostician.md',
   ];
-  check('十一份提示词一份不缺', requiredPrompts.filter((f) => !promptFiles.includes(f)), []);
+  check('十三份提示词一份不缺', requiredPrompts.filter((f) => !promptFiles.includes(f)), []);
   const granularFiles = [
     '00-shared-context.md', '10-dispatcher.md', '20-class-computational-biology.md',
-    '24-class-blueprint-generator.md', '50-chain-reviewer.md',
+    '24-class-blueprint-generator.md', '25-class-english.md', '50-chain-reviewer.md',
   ];
   check(
     '写着颗粒度的每一份都写着「15 分钟 ~ 2 小时」',
     granularFiles.filter((f) => !promptText(f).includes('15 分钟 ~ 2 小时')),
     [],
   );
-  const chainLenFiles = ['00-shared-context.md', '10-dispatcher.md', '20-class-computational-biology.md', '50-chain-reviewer.md'];
+  const chainLenFiles = ['00-shared-context.md', '10-dispatcher.md', '20-class-computational-biology.md', '25-class-english.md', '50-chain-reviewer.md'];
   check(
     '写着链长的每一份都写着「8~40」并给出 60 的上限',
     chainLenFiles.filter((f) => !/8~40/.test(promptText(f)) || !/60/.test(promptText(f))),
@@ -5496,6 +5550,1060 @@ try {
     '两条轨道各自的 MAX_DRAFTS：AI 60 / 本地 5（数值本身也钉住，不只靠互指注释）',
     [/const MAX_DRAFTS = 60;/.test(adaptersSrc), /const MAX_DRAFTS = 5;/.test(mockForgeSrc)],
     [true, true],
+  );
+
+  // -------------------------------------------------------------------------
+  console.log('\n【㊹ 英语线（Phase 7 · up 迁移）：第五条初始线的整条挂载链】');
+  // -------------------------------------------------------------------------
+  // 追加一条职业线的失败方式不是报错，而是**漏挂**：目录里加了、注册表没加，
+  // 或提示词文件在、路由词没写 —— 界面上少一个入口、铸链永远铸不到这条线，
+  // 而没有任何地方会响。所以这一节把"一条线要活着必须跨过的六道关"逐个点名：
+  //   ① 目录（CLASSES）② 提示词三表与花名册 ③ 提示词正文的硬口径
+  //   ④ payloads 的两份职业线清单 ⑤ mockForge 的关键词路由 ⑥ 终极目标挂靠。
+  // ㉒ 的种子断言是 CLASSES.every 形式（数量 / 唯一性 / 星级跨度 / 工时单位 /
+  // 颗粒度），英语线的种子已被那一节自动覆盖，这里只补本线特有的三条。
+  const english = CLASSES.find((c) => c.classId === 'english_learner');
+  truthy('① 目录里有 english_learner（第五条第 5 线）', english);
+  check('① 五条初始线（四条旧线 + 英语）', CLASSES.length, 5);
+  check('① 英语线只挂一个终极目标：GLOBAL_MOBILITY', english.linkedGoalIds, ['GLOBAL_MOBILITY']);
+  check(
+    '① 种子与线同源（没有一颗种子指向别的目标）',
+    english.seedQuests.flatMap((s) => s.linkedGoalIds).filter((g) => g !== 'GLOBAL_MOBILITY'),
+    [],
+  );
+  check(
+    '① 种子池 10 条（本地轨道重抽的数学：10 − 首轮 5 = 5 条 fresh ≥ 4）',
+    english.seedQuests.length,
+    10,
+  );
+  check(
+    '① 种子的前置都指回本线（真题闭环 → 摸底定标）',
+    english.seedQuests
+      .flatMap((s) => s.prerequisiteTempIds)
+      .filter((t) => !english.seedQuests.some((s) => s.tempId === t)),
+    [],
+  );
+
+  // —— ② 提示词三表 + 花名册：四个落点必须同指一份文件 ——
+  const promptsIdx = await server.ssrLoadModule('/src/ai/prompts/index.ts');
+  truthy(
+    '② CLASS_PROMPT_REF 挂着英语线的正文（?raw 读到了真实内容）',
+    (promptsIdx.CLASS_PROMPT_REF.english_learner ?? '').includes('雅思 7.0'),
+  );
+  check(
+    '② PROMPT_FILE_MAP.class 与 CLASS_PROMPT_REF 一一对应',
+    promptsIdx.PROMPT_FILE_MAP.class.length,
+    Object.keys(promptsIdx.CLASS_PROMPT_REF).length,
+  );
+  truthy(
+    '② 花名册上那位（语匠）挂着同一份提示词文件',
+    cleanState.agents.records.some(
+      (a) =>
+        a.id === 'agent_class_english' &&
+        a.classId === 'english_learner' &&
+        a.profile.systemPromptRef === '25-class-english.md',
+    ),
+  );
+
+  // —— ③ 提示词正文的硬口径：颗粒度在、出处在、旧口径的字样不在 ——
+  const englishPrompt = promptText('25-class-english.md');
+  check(
+    '③ 25-class-english.md：颗粒度与 CC BY-NC 4.0 出处都在，禁用字样一条都没有',
+    [
+      englishPrompt.includes('15 分钟 ~ 2 小时'),
+      englishPrompt.includes('CC BY-NC 4.0'),
+      /3~5\s*步/.test(englishPrompt) ||
+        /30\s*分钟\s*~\s*4\s*小时/.test(englishPrompt) ||
+        /2~4\s*小时/.test(englishPrompt),
+    ],
+    [true, true, false],
+  );
+
+  // —— ④ payloads 的两份职业线清单：与目录同集合（防第 6 条线再次漂移） ——
+  const payloadsSrc = readFileSync(join(root, 'src/ai/payloads.ts'), 'utf8');
+  const listedArrays = [...payloadsSrc.matchAll(/\['computational_biology',[^\]]*\]/g)].map((m) =>
+    [...m[0].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]).sort(),
+  );
+  const classesSorted = CLASSES.map((c) => c.classId).sort();
+  check(
+    '④ payloads 两处职业线清单都在，且与目录同集合',
+    [
+      listedArrays.length,
+      listedArrays.every((arr) => JSON.stringify(arr) === JSON.stringify(classesSorted)),
+    ],
+    [2, true],
+  );
+
+  // —— ⑤ mockForge 的关键词路由：英语的想到英语线，别人的想法不许被抢 ——
+  const { routeClass } = await server.ssrLoadModule('/src/lib/mockForge.ts');
+  check(
+    '⑤ 「雅思 / 背单词 / IELTS」都落英语线',
+    [routeClass('想考雅思，先把口语和听力补上'), routeClass('每天背 20 个单词'), routeClass('IELTS 7.0 长期计划')],
+    ['english_learner', 'english_learner', 'english_learner'],
+  );
+  check(
+    '⑤ 「英语写作」归英语线，不被内容线的「写作」抢走（路由顺序的边界）',
+    routeClass('想提高英语写作'),
+    'english_learner',
+  );
+  check(
+    '⑤ 纯内容线想法不被英语线抢走',
+    [routeClass('想把小红书账号做起来'), routeClass('想做一个分享内容的公众号')],
+    ['social_media_influencer', 'social_media_influencer'],
+  );
+
+  // —— ⑥ 终极目标挂靠：gm_language 所在的 GLOBAL_MOBILITY 把英语算进驱动线 ——
+  const gm = EG_ALL.find((g) => g.id === 'GLOBAL_MOBILITY');
+  check(
+    '⑥ 「语言的钥匙」所在目标的驱动线里点名了英语',
+    [gm.drivenByClassIds.includes('english_learner'), gm.milestones.some((m) => m.id === 'gm_language')],
+    [true, true],
+  );
+
+  // -------------------------------------------------------------------------
+  console.log('\n【㊶ 三档容量与回航（Phase 7 · up 迁移）：透传 / 下沿 / 停滞判定 / 素材】');
+  // -------------------------------------------------------------------------
+  // 三档容量（满档 / 轻档 / 回档）走两条显式通道进模型：payload 的 `capacity`
+  // 字段与 directedDecision 的建议链长。**不拼进 idea 字符串** —— 拼接会污染
+  // sourceIdea 与链标题兜底。这一节把三条通道各钉一遍，再钉住"回档的 4 步
+  // 不会被 schema 下沿 clamp 回 8"，最后钉 isStalled 的三个边界 ——
+  // 停航判定错了不会崩溃，只会让回航按钮在新档第一天就亮着（那是在催人），
+  // 或者永远不亮（这个功能等于没有）。两种都只能被断言抓住。
+  const { buildDispatcherPayload, buildClassPayload } = await server.ssrLoadModule('/src/ai/payloads.ts');
+  const { mockDispatcherDecision } = await server.ssrLoadModule('/src/lib/mockAgents.ts');
+  const { SCHEMAS } = await server.ssrLoadModule('/src/ai/schemas.ts');
+  const {
+    isStalled,
+    daysSinceLastCompletion,
+    lastCompletionAt,
+    STALLED_DAYS,
+  } = await server.ssrLoadModule('/src/lib/selectors.ts');
+  const { composeReturnBrief } = await server.ssrLoadModule('/src/lib/questBriefs.ts');
+  /** 夹具用的"此刻"：整点 UTC，与下面各个 completedAt 的毫秒差是整天的倍数 */
+  const nowRef = new Date('2026-10-09T12:00:00.000Z');
+
+  // —— ① capacity 透传：两份 payload + 替身的建议链长 + thunks 的直连线 ——
+  const dpRelapse = buildDispatcherPayload(cleanState, {
+    idea: '想回来走走',
+    deepDeliberation: false,
+    capacity: 'relapse',
+  });
+  check(
+    '① dispatcher payload 收到回档（显式字段），idea 字符串里没有容量字样',
+    [
+      dpRelapse.capacity,
+      dpRelapse.rawIdea.includes('回档'),
+      dpRelapse.rawIdea.includes('三到五步'),
+    ],
+    ['relapse', false, false],
+  );
+  check(
+    '① 不传 capacity 时是满档（存量三处入口零破坏）',
+    buildDispatcherPayload(cleanState, { idea: 'x', deepDeliberation: false }).capacity,
+    'full',
+  );
+  const dirDecision = mockDispatcherDecision('想考雅思', 'relapse');
+  const cpRelapse = buildClassPayload(
+    cleanState,
+    { classId: 'english_learner', idea: '想考雅思', decision: dirDecision, capacity: 'relapse' },
+    nowRef,
+  );
+  check(
+    '① class payload 与 dispatcher 同源透传（含不传时的满档默认）',
+    [
+      cpRelapse.capacity,
+      buildClassPayload(
+        cleanState,
+        { classId: 'english_learner', idea: '想考雅思', decision: dirDecision },
+        nowRef,
+      ).capacity,
+    ],
+    ['relapse', 'full'],
+  );
+  check(
+    '① 替身的建议链长：回档 4 / 轻档与满档 8；thunks 直连线同款（relapse → 4）',
+    [
+      mockDispatcherDecision('x', 'relapse').questShape.suggestedChainLength,
+      mockDispatcherDecision('x', 'light').questShape.suggestedChainLength,
+      mockDispatcherDecision('x').questShape.suggestedChainLength,
+      /capacity === 'relapse' \? 4 : 8/.test(thunksSrc),
+      /input\.capacity \?\? 'full'/.test(thunksSrc),
+    ],
+    [4, 8, 8, true, true],
+  );
+
+  // —— ② schema 下沿放宽到 3 + 提示词措辞（「三到五步」，不要「3~5 步」） ——
+  const chainLenSchema = SCHEMAS.dispatcherDecision.properties.questShape.properties.suggestedChainLength;
+  check(
+    '② 建议链长下沿 3（回档的 4 步不再被 clamp 回 8），上沿 40 不动',
+    [chainLenSchema.minimum, chainLenSchema.maximum],
+    [3, 40],
+  );
+  check(
+    '② 00-shared-context 与 10-dispatcher 写着「三到五步」，两份都没有「3~5 步」',
+    [
+      promptText('00-shared-context.md').includes('三到五步'),
+      promptText('10-dispatcher.md').includes('三到五步'),
+      /3~5\s*步/.test(promptText('00-shared-context.md')) || /3~5\s*步/.test(promptText('10-dispatcher.md')),
+    ],
+    [true, true, false],
+  );
+
+  // —— ③ isStalled 的边界：只认"完成"，不认"在手"；3 天整算停滞，差一天不算 ——
+  // 夹具手法：拿 mockState 的副本，先把所有 completedAt 抹平（不依赖既有存档
+  // 恰好完成过什么），再按用例点上一笔 —— 每个用例一个干净的起点。
+  const withCompletions = (isoList) => {
+    const st = createMockState();
+    const ids = st.quests.order.filter((id) => st.quests.byId[id]);
+    for (const id of ids) st.quests.byId[id] = { ...st.quests.byId[id], completedAt: null };
+    isoList.forEach((iso, i) => {
+      st.quests.byId[ids[i]] = { ...st.quests.byId[ids[i]], status: 'completed', completedAt: iso };
+    });
+    return st;
+  };
+  check(
+    '③ 判定线与口径常量：STALLED_DAYS=3；从未完成过 → false + null（新玩家不被催）',
+    [STALLED_DAYS, isStalled(cleanState, nowRef), daysSinceLastCompletion(cleanState, nowRef)],
+    [3, false, null],
+  );
+  const inHand = withCompletions([]);
+  const inHandCount = inHand.quests.order.filter((id) =>
+    ['claimed', 'active', 'turn_in_pending'].includes(inHand.quests.byId[id]?.status),
+  ).length;
+  check(
+    '③ 手里有活、但一件没完成 → 不是停滞（"动过"只认完成，不认领到手上）',
+    [inHandCount > 0, isStalled(inHand, nowRef)],
+    [true, false],
+  );
+  check(
+    '③ 距上次完成整 3 天 → 停滞（判定线恰好落在 3 天上）',
+    [
+      daysSinceLastCompletion(withCompletions(['2026-10-06T12:00:00.000Z']), nowRef),
+      isStalled(withCompletions(['2026-10-06T12:00:00.000Z']), nowRef),
+    ],
+    [3, true],
+  );
+  check(
+    '③ 昨天 / 前天的完成 → 都不是停滞（差一天都不算）',
+    [
+      isStalled(withCompletions(['2026-10-08T12:00:00.000Z']), nowRef),
+      isStalled(withCompletions(['2026-10-07T12:00:00.000Z']), nowRef),
+    ],
+    [false, false],
+  );
+  check(
+    '③ lastCompletionAt 取最近一次（最大 completedAt），不是题目顺序里的第一条',
+    [
+      lastCompletionAt(withCompletions(['2026-10-01T12:00:00.000Z', '2026-10-05T12:00:00.000Z'])),
+      daysSinceLastCompletion(withCompletions(['2026-10-01T12:00:00.000Z', '2026-10-05T12:00:00.000Z']), nowRef),
+    ],
+    ['2026-10-05T12:00:00.000Z', 4],
+  );
+
+  // —— ④ 回航素材：点名搁下的那条链、只说处境不写规格、永远出得了题 ——
+  const stalledByChain = withCompletions(['2026-10-05T12:00:00.000Z']);
+  const openChainId = Object.keys(stalledByChain.quests.chains).find((cid) => {
+    const c = stalledByChain.quests.chains[cid];
+    return c.questIds.length > 0 && stalledByChain.quests.byId[c.questIds[0]];
+  });
+  const openChain = stalledByChain.quests.chains[openChainId];
+  stalledByChain.quests.chains[openChainId] = { ...openChain, completed: false, closedAt: null };
+  stalledByChain.quests.byId[openChain.questIds[0]] = {
+    ...stalledByChain.quests.byId[openChain.questIds[0]],
+    status: 'completed',
+    completedAt: '2026-10-05T12:00:00.000Z',
+  };
+  const returnBrief = composeReturnBrief(stalledByChain);
+  check(
+    '④ 回航素材非空、点名搁下的那条链、收尾是"从最小的一步重新开始"',
+    [
+      returnBrief.length > 0,
+      returnBrief.includes(openChain.title),
+      returnBrief.includes('从最小的一步重新开始'),
+    ],
+    [true, true, true],
+  );
+  check(
+    '④ 容量规格不进 idea 字符串（"几步、多长"只走 capacity 字段）',
+    [
+      returnBrief.includes('三到五步'),
+      returnBrief.includes('回档'),
+      returnBrief.includes('8~40'),
+    ],
+    [false, false, false],
+  );
+
+  // —— ⑤ UI 接线：素材函数被真的调用、档位与入口都传到位 ——
+  // 函数写好了却没人调用，是这一整套迁移里最安静的一种失败（功能"在"，
+  // 只是没有任何入口）。这里只钉接线事实，渲染由 panel-smoke 那侧管。
+  const bountySrc = readFileSync(join(root, 'src/components/panels/BountyPanel.tsx'), 'utf8');
+  check(
+    '⑤ 接线在场：回航入口（relapse + return + 素材）与灵感页三档 Chip',
+    [
+      bountySrc.includes('composeReturnBrief(save)'),
+      bountySrc.includes("capacity: 'relapse'"),
+      bountySrc.includes("from: 'return'"),
+      bountySrc.includes("label: '满档'") && bountySrc.includes("label: '轻档'") && bountySrc.includes("label: '回档'"),
+    ],
+    [true, true, true, true],
+  );
+
+  // -------------------------------------------------------------------------
+  console.log('\n【㊷ 收束与收官（Phase 7 · up 迁移）：停止也是完成】');
+  // -------------------------------------------------------------------------
+  // 收束 = 玩家说"这条线到此为止"，在它走完之前。它不是失败，也不改写历史：
+  //   未走完的成员（draft / offered / claimed / active）转 abandoned 并归档；
+  //   走过的成员仍是 completed，一步不退；链记 closedAt，completed 保持 false。
+  // 「走完」与「收束」是两条轨道 —— 收官界面的两态文案就按这两个字段判。
+
+  /** 铸一条线（不确认），返回状态与链 */
+  const forgeOne = (idea) => {
+    const s = generateQuestChain(createMockState(), { idea, deepDeliberation: false, classId: null }, NET_NOW);
+    return { state: s, chain: chainFromIdea(s, idea) };
+  };
+  /** 把一条链从铸到走完，全程走真实现（不手改状态） */
+  const walkOne = (idea) => {
+    const { state, chain } = forgeOne(idea);
+    let s = confirmQuestChain(state, chain.id, NET_NOW);
+    for (const id of chain.questIds) {
+      s = claimQuest(s, id, NET_NOW);
+      s = startQuest(s, id, NET_NOW);
+      s = openTurnIn(s, id, NET_NOW);
+      s = completeQuest(s, id, { reflection: '', bonusPct: 0, bonusReason: null, verdict: null }, NET_NOW);
+    }
+    return { state: s, chain };
+  };
+
+  // —— ① 三守卫：不存在的链 / 走完的链 / 有一步在结算里 → 一律原引用返回 ——
+  const sc = createMockState();
+  check(
+    '① 不存在的链 → 原对象返回；闸门给 not_found 理由',
+    [closeQuestChain(sc, 'ch_nope', NET_NOW) === sc, canCloseQuestChain(sc, 'ch_nope').reason],
+    [true, 'not_found'],
+  );
+
+  const sWalk = walkOne('把晨间散步变成一条不需要意志力的路');
+  check(
+    '① 整条线走完 → completed=true 且 closedAt=null（走完是派生事实，收束是动作）',
+    [sWalk.state.quests.chains[sWalk.chain.id].completed, sWalk.state.quests.chains[sWalk.chain.id].closedAt],
+    [true, null],
+  );
+  check(
+    '① 走完的线收不了（原对象返回）—— 它要的是收官，不是收束',
+    [
+      closeQuestChain(sWalk.state, sWalk.chain.id, NET_NOW) === sWalk.state,
+      canCloseQuestChain(sWalk.state, sWalk.chain.id).reason,
+    ],
+    [true, 'completed'],
+  );
+
+  const { state: sTurnBase, chain: sTurnChain } = forgeOne('把晚间复盘变成一条固定下来的路');
+  let sTurn = confirmQuestChain(sTurnBase, sTurnChain.id, NET_NOW);
+  sTurn = claimQuest(sTurn, sTurnChain.questIds[0], NET_NOW);
+  sTurn = startQuest(sTurn, sTurnChain.questIds[0], NET_NOW);
+  sTurn = openTurnIn(sTurn, sTurnChain.questIds[0], NET_NOW);
+  check(
+    '① 有一步在结算里 → 收束被拦下（原对象返回），闸门告诉你先把它结掉',
+    [closeQuestChain(sTurn, sTurnChain.id, NET_NOW) === sTurn, canCloseQuestChain(sTurn, sTurnChain.id).reason],
+    [true, 'turn_in_pending'],
+  );
+
+  // —— ② 收束落地：四种活着的状态各自搁下，走过的历史一步不改 ——
+  const { state: sDraft, chain: sDraftChain } = forgeOne('写一本没人催我的书');
+  check('② 备好：草稿链在「待议」名单里', chainsAwaitingReview(sDraft).some((c) => c.id === sDraftChain.id), true);
+  check('② 闸门对活着的线说可以', canCloseQuestChain(sDraft, sDraftChain.id).ok, true);
+  const sDraftClosed = closeQuestChain(sDraft, sDraftChain.id, NET_NOW);
+  check(
+    '② 草稿链整条收束：每个成员转 abandoned（draft → 搁下）',
+    sDraftChain.questIds.map((id) => sDraftClosed.quests.byId[id].status),
+    sDraftChain.questIds.map(() => 'abandoned'),
+  );
+  check(
+    '② closedAt 落定、completed 保持 false（收束不冒充走完）；链仍在容器里',
+    [
+      sDraftClosed.quests.chains[sDraftChain.id].closedAt,
+      sDraftClosed.quests.chains[sDraftChain.id].completed,
+      Boolean(sDraftClosed.quests.chains[sDraftChain.id]),
+    ],
+    ['2026-10-07T12:00:00.000Z', false, true],
+  );
+  check(
+    '② 归档：成员进 archivedIds、退出 order、留在 byId',
+    [
+      sDraftClosed.quests.archivedIds.length - sDraft.quests.archivedIds.length,
+      sDraftChain.questIds.every((id) => !sDraftClosed.quests.order.includes(id)),
+      sDraftChain.questIds.every((id) => Boolean(sDraftClosed.quests.byId[id])),
+    ],
+    [sDraftChain.questIds.length, true, true],
+  );
+  check('② 收束后从「待议」名单消失', chainsAwaitingReview(sDraftClosed).some((c) => c.id === sDraftChain.id), false);
+
+  const sDraftIds = new Set(sDraftChain.questIds);
+  const leaks = (list) => list.some((q) => sDraftIds.has(q.id));
+  check(
+    '② abandoned 不残留于任何 tab 输入集合（草稿 / 可接 / 在手 / 进行中，四路逐一过）',
+    [
+      leaks(draftQuests(sDraftClosed)),
+      leaks(claimableQuests(sDraftClosed)),
+      leaks(inHandQuests(sDraftClosed)),
+      leaks(inProgressQuests(sDraftClosed)),
+      questsByStatus(sDraftClosed, 'abandoned').length,
+    ],
+    [false, false, false, false, 0],
+  );
+
+  // 已在手上的两种：claimed / active 也各自搁下
+  const { state: sClaimBase, chain: sClaimChain } = forgeOne('把英语晨读变成一条能坚持的路');
+  const sClaim = claimQuest(confirmQuestChain(sClaimBase, sClaimChain.id, NET_NOW), sClaimChain.questIds[0], NET_NOW);
+  const sClaimClosed = closeQuestChain(sClaim, sClaimChain.id, NET_NOW);
+  check(
+    '② 已领取的链收束：claimed 的那步转 abandoned（领了也能停）',
+    sClaimClosed.quests.byId[sClaimChain.questIds[0]].status,
+    'abandoned',
+  );
+
+  const { state: sActBase, chain: sActChain } = forgeOne('把餐后散步变成一条固定的路');
+  let sAct = claimQuest(confirmQuestChain(sActBase, sActChain.id, NET_NOW), sActChain.questIds[0], NET_NOW);
+  sAct = startQuest(sAct, sActChain.questIds[0], NET_NOW);
+  const sActClosed = closeQuestChain(sAct, sActChain.id, NET_NOW);
+  check(
+    '② 执行中的链收束：active 的那步转 abandoned（做了一半也能停）',
+    sActClosed.quests.byId[sActChain.questIds[0]].status,
+    'abandoned',
+  );
+
+  // 半途收束：走过的成员一步不退 —— 历史不因"停止"被改写
+  const { state: sHalfBase, chain: sHalfChain } = forgeOne('把每周回信变成一条不拖的路');
+  let sHalf = claimQuest(confirmQuestChain(sHalfBase, sHalfChain.id, NET_NOW), sHalfChain.questIds[0], NET_NOW);
+  sHalf = startQuest(sHalf, sHalfChain.questIds[0], NET_NOW);
+  sHalf = openTurnIn(sHalf, sHalfChain.questIds[0], NET_NOW);
+  sHalf = completeQuest(sHalf, sHalfChain.questIds[0], { reflection: '', bonusPct: 0, bonusReason: null, verdict: null }, NET_NOW);
+  const sHalfClosed = closeQuestChain(sHalf, sHalfChain.id, NET_NOW);
+  check(
+    '② 走了第一步再收束：completed 的成员仍是 completed（含 completedAt），其余搁下',
+    [
+      sHalfClosed.quests.byId[sHalfChain.questIds[0]].status,
+      sHalfClosed.quests.byId[sHalfChain.questIds[0]].completedAt,
+      sHalfChain.questIds.slice(1).every((id) => sHalfClosed.quests.byId[id].status === 'abandoned'),
+      sHalfClosed.quests.chains[sHalfChain.id].completed,
+    ],
+    ['completed', '2026-10-07T12:00:00.000Z', true, false],
+  );
+  check(
+    '② 走过的历史仍在念：lastCompletionAt 读得到那一步（收束不改写"动过"）',
+    lastCompletionAt(sHalfClosed),
+    '2026-10-07T12:00:00.000Z',
+  );
+
+  // —— ③ 接线：算子被真的调用、已收束组与收官抽屉挂上、末步总结块在结算视图里 ——
+  // 函数写好了却没人调用，是这一整套迁移里最安静的一种失败。这里只钉接线事实，
+  // 渲染由 panel-smoke 那侧管。
+  const scBounty = readFileSync(join(root, 'src/components/panels/BountyPanel.tsx'), 'utf8');
+  const scFinale = readFileSync(join(root, 'src/components/panels/ChainFinale.tsx'), 'utf8');
+  const scTurnIn = readFileSync(join(root, 'src/components/panels/TurnInSheet.tsx'), 'utf8');
+  check(
+    '③ 接线在场：两处收束入口（待议卡 / 在手卡）、已收束组、收官抽屉',
+    [
+      scBounty.includes('closeQuestChain(s, chain.id, new Date())'),
+      scBounty.includes('closeQuestChain(s, membership.chainId, new Date())'),
+      scBounty.includes('<ClosedChainCard'),
+      scBounty.includes('<ChainFinale chainId={finaleId}'),
+      scBounty.includes('title="已收束"'),
+    ],
+    [true, true, true, true, true],
+  );
+  check(
+    '③ 收官正文与结算块同源：状态词列全四种、末一步的追加块接线在 TurnInSheet',
+    [
+      ['completed', 'abandoned', 'rerouted', 'rejected'].every((k) => scFinale.includes(`${k}:`)),
+      scFinale.includes('ChainSummaryBlock'),
+      scTurnIn.includes('ChainSummaryBlock chainId={quest.chain.chainId}'),
+      scTurnIn.includes('quest.chain.index + 1 === quest.chain.total'),
+    ],
+    [true, true, true, true],
+  );
+  // 收束的二段确认（ConfirmDialog）关着时不渲染、SSR 也进不去 —— 渲染层验不到，
+  // 但文案是产品口吻的承重件（「停止也是完成」就落在那句 detail 上），在源码层
+  // 钉死：两处入口（待议卡 / 在手卡）必须同款，别哪天只改了一处。
+  check(
+    '③ 收束的二段确认两处同款、逐字（走到这里 / 停止也是完成 / 确认钮就是「收束」）',
+    [
+      (scBounty.match(/这条线就走到这里？/g) ?? []).length,
+      (scBounty.match(/收束不是失败 —— 停止也是完成/g) ?? []).length,
+      (scBounty.match(/confirmLabel="收束"/g) ?? []).length,
+    ],
+    [2, 2, 2],
+  );
+
+  // —— ④ 证据阶梯（创业线）：提示词与收官块逐级同源 ——
+  // 五级台阶是创业者 Agent 的判据（每个验证任务都要"指名台阶"），
+  // 也是收官时玩家回看用的对照表。两边各写一份就会漂移 —— 漂移的那天，
+  // AI 按旧台阶出题、收官按新台阶对照，玩家在两句话里读到自己两个样子。
+  const ladderPrompt = promptText('23-class-entrepreneur.md');
+  check(
+    '④ 23-class-entrepreneur.md：证据阶梯五级在场，且要求验证任务指名台阶',
+    [
+      ladderPrompt.includes('证据阶梯'),
+      ['说「不错」', '给样例', '约试做', '付款验收', '复购'].every((r) => ladderPrompt.includes(r)),
+      ladderPrompt.includes('指名台阶'),
+    ],
+    [true, true, true],
+  );
+  const finaleSrc = readFileSync(join(root, 'src/components/panels/ChainFinale.tsx'), 'utf8');
+  check(
+    '④ 收官块：五级台阶与提示词同源、只挂创业线（对照表不是记分板，不读任何数据）',
+    [
+      ['说「不错」', '给出样例', '约试做', '付款验收', '复购'].every((r) => finaleSrc.includes(r)),
+      finaleSrc.includes("chain.classId === 'startup_entrepreneur'"),
+      finaleSrc.includes('export function EntrepreneurLadderNote'),
+    ],
+    [true, true, true],
+  );
+
+  // -------------------------------------------------------------------------
+  console.log('\n【㊸ 单步打回（Phase 7 · 事故③尾巴）：领了、做了一半，也换得起】');
+  // -------------------------------------------------------------------------
+  // 事故③的尾巴：换法此前只发生在"还没轮到手上"的步骤上（draft / offered）。
+  // 可真实的卡点往往出现在**做起来之后** —— 领了才发现不对、做了一半才发现
+  // 这一版走不通。四态可换（draft / offered / claimed / active）之后，价值全在
+  // **继承**上：替换件必须接住玩家手里的进度（状态、claimedAt、startedAt），
+  // 而不是把他拉回起点。"换个做法"不是"你白干了"。
+  // 唯一的例外是 turn_in_pending：它已经在结算里，先结掉它，才有"做法"可谈；
+  // 已完结的步骤同样留在原地 —— 已发生的事不做改写。
+
+  // —— ① 名单与布尔口径：四态就是这份名单，别处都跟它对齐 ——
+  check(
+    '① 可换名单逐字：draft / offered / claimed / active（turn_in_pending 与完结态不在列）',
+    REROUTABLE_STATUSES,
+    ['draft', 'offered', 'claimed', 'active'],
+  );
+
+  // —— ② 行为矩阵：claimed → active 一路换上来，进度时刻逐手交接 ——
+  const RC_IDEA = '把英语听力练成一条每天都能走的路';
+  const rc = generateQuestChain(createMockState(), { idea: RC_IDEA, deepDeliberation: false, classId: null }, NET_NOW);
+  const rcChain = chainFromIdea(rc, RC_IDEA);
+  const rcStep0 = rcChain.questIds[0];
+  const rcOpen = confirmQuestChain(rc, rcChain.id, NET_NOW);
+  check('② 备好一条揭开第一步的线（offered）', rcOpen.quests.byId[rcStep0].status, 'offered');
+  check(
+    '② isReroutable 布尔口径：offered 为真、completed 为假',
+    [isReroutable(rcOpen.quests.byId[rcStep0]), isReroutable(rc.quests.byId['q_cb_repro_figure'])],
+    [true, false],
+  );
+
+  // 单条任务（没有链、没有"下一步"）不适用 —— 对它该用的是打回
+  const rcSolo = {
+    ...rcOpen,
+    quests: {
+      ...rcOpen.quests,
+      byId: { ...rcOpen.quests.byId, [rcStep0]: { ...rcOpen.quests.byId[rcStep0], chain: null } },
+    },
+  };
+  check('② 单条任务（没有下一步可说）→ 原对象返回', rerouteQuestDraft(rcSolo, rcStep0, '想换', NET_NOW) === rcSolo, true);
+
+  // turn_in_pending 拒得早早的：先走一条丢弃分支，把它从 active 推进结算里 ——
+  // 此刻链额度还是 0，正好能钉住"被拒的那一下没花额度"（守卫在额度检查之前）。
+  const rcTurnProbe = openTurnIn(startQuest(claimQuest(rcOpen, rcStep0, NET_NOW), rcStep0, NET_NOW), rcStep0, NET_NOW);
+  check('② 备好：丢弃分支上这一步已进结算（turn_in_pending）', rcTurnProbe.quests.byId[rcStep0].status, 'turn_in_pending');
+  check(
+    '② 待结算的那一步 → 原对象返回，且一分额度都没花',
+    [
+      rerouteQuestDraft(rcTurnProbe, rcStep0, '想换成小一点的', NET_NOW) === rcTurnProbe,
+      rcTurnProbe.quests.chains[rcChain.id].review.rerouteCount,
+    ],
+    [true, 0],
+  );
+
+  // claimed：领了才发现不对。替换件继承状态与 claimedAt，进度不清零。
+  const rcClaimed = claimQuest(rcOpen, rcStep0, NET_NOW);
+  const rcClaimedAt = rcClaimed.quests.byId[rcStep0].claimedAt;
+  check(
+    '② 备好：这一步已领取（claimed，claimedAt 在场）',
+    [rcClaimed.quests.byId[rcStep0].status, rcClaimedAt !== null],
+    ['claimed', true],
+  );
+  const RC_REQ_1 = '这一步摊得太大：装环境就卡了我两天';
+  const rcR1 = rerouteQuestDraft(rcClaimed, rcStep0, RC_REQ_1, NET_NOW);
+  const rcR1Id = rcR1.quests.chains[rcChain.id].questIds[0];
+  const rcR1Q = rcR1.quests.byId[rcR1Id];
+  check(
+    '② claimed 换法：替换件仍是 claimed、claimedAt 原样接回、startedAt 仍空；旧步留档 rerouted',
+    [rcR1 !== rcClaimed, rcR1Q.status, rcR1Q.claimedAt, rcR1Q.startedAt, rcR1.quests.byId[rcStep0].status],
+    [true, 'claimed', rcClaimedAt, null, 'rerouted'],
+  );
+  check(
+    '② 四选一原因进留档：request 是「展开句：补充」原样（RerouteRecord.request）',
+    [rcR1Q.origin.rerouteHistory.length, rcR1Q.origin.rerouteHistory[0].request],
+    [1, RC_REQ_1],
+  );
+  check('② 换一次消耗一次额度', rcR1.quests.chains[rcChain.id].review.rerouteCount, 1);
+
+  // active：做了一半才发现这一版走不通
+  const rcActive = startQuest(rcR1, rcR1Id, NET_NOW);
+  const rcStartedAt = rcActive.quests.byId[rcR1Id].startedAt;
+  check(
+    '② 备好：替换件已开始（active，startedAt 在场，claimedAt 没被冲掉）',
+    [
+      rcActive.quests.byId[rcR1Id].status,
+      rcStartedAt !== null,
+      rcActive.quests.byId[rcR1Id].claimedAt === rcClaimedAt,
+    ],
+    ['active', true, true],
+  );
+  const RC_REQ_2 = '这一步说得太糊：不知道产物要交给谁';
+  const rcR2 = rerouteQuestDraft(rcActive, rcR1Id, RC_REQ_2, NET_NOW);
+  const rcR2Id = rcR2.quests.chains[rcChain.id].questIds[0];
+  const rcR2Q = rcR2.quests.byId[rcR2Id];
+  check(
+    '② active 换法：替换件仍是 active，claimedAt 与 startedAt 都原样接回（进度逐手交接）',
+    [rcR2Q.status, rcR2Q.claimedAt, rcR2Q.startedAt, rcR2.quests.byId[rcR1Id].status],
+    ['active', rcClaimedAt, rcStartedAt, 'rerouted'],
+  );
+  check('② 两次换法的轨迹都背在替换件上（不是只有最后一次）', rcR2Q.origin.rerouteHistory.length, 2);
+
+  // —— ③ 额度与终态：软上限仍 2；结算里/已完结的都留在原地 ——
+  check(
+    '③ 链级软上限仍 2：第 3 次换做法 → 原对象返回，额度停住',
+    [
+      rerouteQuestDraft(rcR2, rcR2Id, '第三次', NET_NOW) === rcR2,
+      rcR2.quests.chains[rcChain.id].review.rerouteCount,
+    ],
+    [true, 2],
+  );
+  const rcReproChainId = rc.quests.byId['q_cb_repro_figure'].chain.chainId;
+  check(
+    '③ 已完结的那一步 → 原对象返回；它的链额度一分未动（换法是活人的动作）',
+    [
+      rerouteQuestDraft(rc, 'q_cb_repro_figure', '想重来', NET_NOW) === rc,
+      rc.quests.chains[rcReproChainId].review.rerouteCount,
+    ],
+    [true, 0],
+  );
+
+  // —— ④ 提示词与 UI 接线：口语化的入口下面，是同一份守卫与同一句话术 ——
+  const rcBountySrc = readFileSync(join(root, 'src/components/panels/BountyPanel.tsx'), 'utf8');
+  check(
+    '④ UI 接线：输入匣被悬赏板与「进行中」共用（两处）、待结算不渲染换法、四选一原因齐',
+    [
+      (rcBountySrc.match(/<RerouteBox /g) ?? []).length,
+      rcBountySrc.includes("quest.status !== 'turn_in_pending'"),
+      ['太大', '太糊', '条件不足', '不想做'].every((l) => rcBountySrc.includes(`label: '${l}'`)),
+      ['这一步摊得太大', '这一步说得太糊', '现在条件不足', '就是不想做这一版'].every((r) => rcBountySrc.includes(`request: '${r}'`)),
+    ],
+    [2, true, true, true],
+  );
+  check(
+    '④ thunks 的入口守卫镜像落库守卫（同一份 isReroutable；被拒的话术在此）',
+    [/isReroutable\(quest\)/.test(thunksSrc), thunksSrc.includes('先把这次结算结掉')],
+    [true, true],
+  );
+  const rcPrompt = promptText('60-reroute.md');
+  check(
+    '④ 60-reroute.md：状态列举、四选一展开句、在手步骤的接手口径都在',
+    [
+      rcPrompt.includes('已领取 / 执行中'),
+      rcPrompt.includes('原地接手'),
+      ['这一步摊得太大', '这一步说得太糊', '现在条件不足', '就是不想做这一版'].every((r) => rcPrompt.includes(r)),
+    ],
+    [true, true, true],
+  );
+
+  // -------------------------------------------------------------------------
+  console.log('\n【㊵ 开局定标（Phase 7 · up 迁移）：先量起点，再谈走多远】');
+  // -------------------------------------------------------------------------
+  // 定标是全流水线第一个**两段式**的 Agent：出题与判分之间隔着一段真人作答
+  // 的时间（回答问题的是玩家，不是流水线）。它带来三种新的失败方式 ——
+  // 每一种都不会报错，只会安静地骗人：
+  //   ① 卷子不落存档 → 答到一半刷新，玩家的诚实劳动没了；
+  //   ② 判分与铸链分开落 → 中间那次刷新留下"判过分但没链"的残档，没法补；
+  //   ③ 数量收口缺席 → 模型给 12 道题、0 道开放题或 1 个维度，玩家对着坏卷发呆。
+  // 所以这一节把整条链走两遍（Mock 与 Live），再单独钉住适配层的收口边界。
+  const { adaptDiagnosticSheet, adaptDiagnosticVerdict } = await server.ssrLoadModule('/src/ai/adapters.ts');
+  const { mockDiagnosticSheet, mockDiagnosticVerdict } = await server.ssrLoadModule('/src/lib/mockAgents.ts');
+  const { buildDiagnosticSheetPayload, buildDiagnosticVerdictPayload } =
+    await server.ssrLoadModule('/src/ai/payloads.ts');
+  const { beginDiagnosis, submitDiagnosisAnswers, completeDiagnosis, cancelDiagnosis } =
+    await server.ssrLoadModule('/src/store/operations.ts');
+  // chainsAwaitingReview 在 ① 那一节已经取过一次了（scripts 顶部的共享绑定）
+
+  // —— ① 出题段的收口：坏卷修成好卷，好卷一笔不动 ——
+  const diagCtx = { knownClassIds: ['english_learner', 'investor'], goalRaw: '我想把英语捡起来' };
+  const messySheet = adaptDiagnosticSheet(
+    {
+      goalReframed: '   ',
+      suggestedClassIds: ['english_learner', 'not_a_class', 'english_learner'],
+      questions: [
+        ...Array.from({ length: 6 }, (_, i) => ({ kind: 'choice', prompt: `选择题 ${i + 1}`, options: ['甲', '乙'] })),
+        { kind: 'choice', prompt: '候选只有一个的选择题', options: ['独苗'] },
+        ...Array.from({ length: 5 }, (_, i) => ({ kind: 'open', prompt: `开放题 ${i + 1}`, options: [] })),
+      ],
+    },
+    diagCtx,
+  );
+  const messyQuestions = messySheet.value.questions;
+  check(
+    '① 12 道题截到 5 道：配比下沿（1 开放 + 2 选择）没被截穿',
+    [messyQuestions.length, messyQuestions.filter((q) => q.kind === 'open').length >= 1,
+      messyQuestions.filter((q) => q.kind === 'choice').length >= 2],
+    [5, true, true],
+  );
+  check(
+    '① 每一手修正都留了痕（数量越界不连坐整卷）',
+    [
+      messySheet.corrections.some((c) => c.includes('截到 5 道')),
+      messySheet.corrections.some((c) => c.includes('转为开放题')),
+      messySheet.corrections.some((c) => c.includes('not_a_class')),
+      messySheet.corrections.some((c) => c.includes('退回你写的原话')),
+    ],
+    [true, true, true, true],
+  );
+  check(
+    '① 建议归属过名单 + 去重，改写稿空白时退回目标原话',
+    [messySheet.value.suggestedClassIds, messySheet.value.goalReframed],
+    [['english_learner'], '我想把英语捡起来'],
+  );
+  check(
+    '① 编号在排序定稿之后发生（q_1..q_n 连续）',
+    messyQuestions.map((q) => q.id),
+    ['q_1', 'q_2', 'q_3', 'q_4', 'q_5'],
+  );
+  const liveDiagSheetOut = {
+    goalReframed: '把英语捡起来 → 能读完英文资料、开短会不慌',
+    suggestedClassIds: ['english_learner'],
+    questions: [
+      { kind: 'open', prompt: '上一次你用英语完整说完一件事是什么时候？', options: [] },
+      { kind: 'open', prompt: '读英文资料时，你卡在哪一层？', options: [] },
+      { kind: 'choice', prompt: '读一段资料你大多停在哪一档？', options: ['逐词查', '能懂大意', '几乎不用查'] },
+      { kind: 'choice', prompt: '开口之前你通常会？', options: ['先写稿', '打腹稿', '直接说'] },
+    ],
+  };
+  check(
+    '① 好卷过收口一笔不动（修正是给坏卷的，不是例行改写）',
+    adaptDiagnosticSheet(liveDiagSheetOut, diagCtx).corrections,
+    [],
+  );
+
+  // —— ② 判分段的收口：数值收拢、维度守恒、构不成基线就返回 null ——
+  const messyVerdict = adaptDiagnosticVerdict({
+    levelLabel: '   ',
+    summary: '   ',
+    dimensions: [
+      { key: 'a', label: '甲', score: 150 },   // 越界 → 100
+      { key: 'a', label: '重复甲', score: 50 }, // key 重复 → 丢弃后者
+      { key: 'b', label: '乙', score: -3 },    // 越界 → 0
+      { key: 'c', label: '丙', score: 55.7 },  // 非整数 → 56
+      { key: '', label: '无键', score: 50 },   // 缺 key → 丢弃
+      { key: 'd', label: '丁', score: 10 },
+      { key: 'e', label: '戊', score: 20 },
+      { key: 'f', label: '己', score: 30 },
+      { key: 'g', label: '庚', score: 40 },    // 有效 7 个 → 截到 6
+    ],
+    strengths: ['同一条', '同一条', '   ', '乙条', '丙条', '丁条', '戊条'],
+    gaps: [],
+  });
+  check(
+    '② 维度收口：去重、clamp、取整、截到 6（数值幻觉收拢不拒收）',
+    [messyVerdict.value.dimensions.map((d) => d.score), messyVerdict.value.dimensions.map((d) => d.key)],
+    [[100, 0, 56, 10, 20, 30], ['a', 'b', 'c', 'd', 'e', 'f']],
+  );
+  check(
+    '② 空标签兜底、短清单去重裁长（每条修正都留痕）',
+    [messyVerdict.value.levelLabel, messyVerdict.value.strengths.length,
+      messyVerdict.corrections.some((c) => c.includes('维度 key')),
+      messyVerdict.corrections.some((c) => c.includes('越界'))],
+    ['起点已记录', 4, true, true],
+  );
+  const thinVerdictAdapted = adaptDiagnosticVerdict({
+    levelLabel: '独苗', summary: '只有一个维度', dimensions: [{ key: 'only', label: '独苗', score: 50 }],
+    strengths: [], gaps: [],
+  });
+  check(
+    '② 只剩 1 个维度 → 构不成基线，返回 null 让调用方走替身（同 isUsableForge 的降级哲学）',
+    [thinVerdictAdapted.value, thinVerdictAdapted.corrections.some((c) => c.includes('构不成基线'))],
+    [null, true],
+  );
+
+  // —— ③ 替身的两段也过收口（mock 吐模型契约形状，适配层在两条轨道都执行） ——
+  // 离线轨道的替身若绕开收口，就成了"只在配了密钥的机器上才存在的防线"。
+  const mockSheetPayload = buildDiagnosticSheetPayload(createMockState(), {
+    goalRaw: '我想把英语捡起来，以后开会不慌',
+  });
+  const mockSheetAdapted = adaptDiagnosticSheet(mockDiagnosticSheet(mockSheetPayload), {
+    knownClassIds: mockSheetPayload.existingClasses.map((c) => c.classId),
+    goalRaw: mockSheetPayload.goalRaw,
+  });
+  const mockQ = mockSheetAdapted.value.questions;
+  check(
+    '③ 替身卷过收口后仍是合法卷：4 题、2+2 配比、编号连续、一笔修正都不用记',
+    [mockQ.length, mockQ.map((q) => q.kind), mockSheetAdapted.corrections],
+    [4, ['open', 'open', 'choice', 'choice'], []],
+  );
+  const mockVerdictAdapted = adaptDiagnosticVerdict(
+    mockDiagnosticVerdict(
+      buildDiagnosticVerdictPayload(
+        createMockState(),
+        { goalReframed: mockSheetAdapted.value.goalReframed, questions: mockQ },
+        {
+          goalRaw: mockSheetPayload.goalRaw,
+          answers: mockQ.map((q, i) => ({ questionId: q.id, text: q.kind === 'choice' ? q.options[0] : `第 ${i + 1} 题的实情。` })),
+        },
+      ),
+    ),
+  );
+  check(
+    '③ 替身判分构成基线（覆盖 / 详略两条），且诚实地只量卷面本身',
+    [mockVerdictAdapted.value !== null, mockVerdictAdapted.value.dimensions.map((d) => d.key), mockVerdictAdapted.corrections],
+    [true, ['coverage', 'detail'], []],
+  );
+
+  // —— ④ 四个纯函数：守卫、落卷、归档、环形上限 ——
+  const diagSheet = mockSheetAdapted.value;
+  const diagSeed = createMockState();
+  check(
+    '④ 起卷两条守卫：空目标 / 空卷 → 原引用返回（没有卷子就没有记录）',
+    [
+      beginDiagnosis(diagSeed, '   ', diagSheet, T_NOW) === diagSeed,
+      beginDiagnosis(diagSeed, '想学英语', { ...diagSheet, questions: [] }, T_NOW) === diagSeed,
+    ],
+    [true, true],
+  );
+  const begun = beginDiagnosis(diagSeed, '  我想把英语捡起来  ', diagSheet, T_NOW);
+  check(
+    '④ 起卷：目标去掉首尾空白、状态 awaiting_answers、整卷入档',
+    [begun.diagnostics.active.goalRaw, begun.diagnostics.active.status, begun.diagnostics.active.questions.length],
+    ['我想把英语捡起来', 'awaiting_answers', 4],
+  );
+  // 卷面是**拷贝**入档：入参是 thunk 递进来的一包东西，改它不该动存档
+  const sheetCopyProbe = { ...diagSheet, questions: diagSheet.questions.map((q) => ({ ...q, options: [...q.options] })) };
+  const begunCopy = beginDiagnosis(diagSeed, '探针', sheetCopyProbe, T_NOW);
+  sheetCopyProbe.questions[0].prompt = '被改了';
+  check('④ 卷面拷贝而非引用（thunk 递进来的那包东西不许碰存档）',
+    begunCopy.diagnostics.active.questions[0].prompt !== '被改了', true);
+  check(
+    '④ 没有进行中的卷 → 交卷是原引用（不空写一笔"交卷"）',
+    submitDiagnosisAnswers(diagSeed, [{ questionId: 'q_1', text: 'x' }]) === diagSeed,
+    true,
+  );
+  const diagAnswers = diagSheet.questions.map((q, i) => ({
+    questionId: q.id,
+    text: q.kind === 'choice' ? q.options[0] : `第 ${i + 1} 题：上个月开会我讲了三句就切中文了。`,
+  }));
+  const diagSubmitted = submitDiagnosisAnswers(begun, diagAnswers);
+  check(
+    '④ 作答按 id 指回落盘、原样入库（不归一化）',
+    [diagSubmitted.diagnostics.active.answers.length, diagSubmitted.diagnostics.active.answers[0].text],
+    [4, '第 1 题：上个月开会我讲了三句就切中文了。'],
+  );
+  check(
+    '④ 判分回来之前可以再交一版（覆盖允许 —— 那一版没有别的消费者）',
+    submitDiagnosisAnswers(diagSubmitted, diagAnswers.slice(0, 2)).diagnostics.active.answers.length,
+    2,
+  );
+  const diagBaselineFixture = mockVerdictAdapted.value;
+  const diagCompleted = completeDiagnosis(diagSubmitted, diagBaselineFixture, 'ch_risk_discipline', T_NOW);
+  check(
+    '④ 落定：基线与链 id **一起**写回，active 归位、记录以 completed 进档案',
+    [
+      diagCompleted.diagnostics.active,
+      diagCompleted.diagnostics.history.at(-1).status,
+      diagCompleted.diagnostics.history.at(-1).baseline === diagBaselineFixture,
+      diagCompleted.diagnostics.history.at(-1).chainId,
+    ],
+    [null, 'completed', true, 'ch_risk_discipline'],
+  );
+  check(
+    '④ 没有进行中的卷 → 落定与放弃都是原引用（判分回来时玩家已放弃 = 正常结局，不是错误）',
+    [
+      completeDiagnosis(diagSeed, diagBaselineFixture, 'ch_x', T_NOW) === diagSeed,
+      cancelDiagnosis(diagSeed, T_NOW) === diagSeed,
+    ],
+    [true, true],
+  );
+  const diagCancelled = cancelDiagnosis(diagSubmitted, T_NOW);
+  check(
+    '④ 放弃：cancelled 归档、卷面清空、留一个时刻',
+    [diagCancelled.diagnostics.active, diagCancelled.diagnostics.history.at(-1).status,
+      typeof diagCancelled.diagnostics.history.at(-1).cancelledAt],
+    [null, 'cancelled', 'string'],
+  );
+  let capState = createMockState();
+  for (let i = 0; i < 23; i += 1) {
+    const at = new Date(T_NOW.getTime() + i * 1000);
+    capState = beginDiagnosis(capState, `第 ${i} 次`, diagSheet, at);
+    capState = cancelDiagnosis(capState, at);
+  }
+  check(
+    '④ 档案环形上限 20：裁最旧、留最新（定标可以起很多次，档案不无限长）',
+    [capState.diagnostics.history.length, capState.diagnostics.history.at(-1).goalRaw],
+    [20, '第 22 次'],
+  );
+
+  // —— ⑤ Mock 轨道端到端：出题 → 交卷 → 判分 + 铸链 ——
+  const diagMockH = harness(createMockState());
+  const designRes = await diagMockH.thunks.designDiagnosis({ goalRaw: '我想把英语捡起来，以后开会不慌' });
+  check('⑤ Mock 轨道 · 出题：没有密钥也出得了卷，来源如实标成 mock',
+    [designRes.ok, designRes.source], [true, 'mock']);
+  const mockActive = diagMockH.state.diagnostics.active;
+  check(
+    '⑤ 卷子落进存档（答到一半刷新不丢的那张卷）',
+    [mockActive !== null, mockActive.status, mockActive.goalRaw, mockActive.questions.length >= 3],
+    [true, 'awaiting_answers', '我想把英语捡起来，以后开会不慌', true],
+  );
+  const earlyRes = await diagMockH.thunks.runDiagnosis();
+  check('⑤ 一道没答就判分 → 拦住（基线才有东西可量）',
+    [earlyRes.ok, earlyRes.message.includes('至少答一道题')], [false, true]);
+  // 交卷走真身算子 —— 生产里 UI 点「交卷」的那一下执行的就是它
+  diagMockH.state = submitDiagnosisAnswers(
+    diagMockH.state,
+    mockActive.questions.map((q, i) => ({
+      questionId: q.id,
+      text: q.kind === 'choice' ? q.options[0] : `第 ${i + 1} 题的实情：写到别人能判断真假。`,
+    })),
+  );
+  const gradeRes = await diagMockH.thunks.runDiagnosis();
+  check('⑤ Mock 轨道 · 判分 + 铸链：一条流水线走通，来源仍是 mock',
+    [gradeRes.ok, gradeRes.source], [true, 'mock']);
+  const mockRecord = diagMockH.state.diagnostics.history.at(-1);
+  const mockForged = diagMockH.state.quests.chains[mockRecord.chainId];
+  check(
+    '⑤ 基线与链 id 一起落定（分开落会留下"判过分但没链"的残档）',
+    [mockRecord.status, mockRecord.baseline !== null, mockForged !== undefined],
+    ['completed', true, true],
+  );
+  check(
+    '⑤ 基线形状合法：维度 2~6、分数 0..100 整数',
+    [
+      mockRecord.baseline.dimensions.length >= 2 && mockRecord.baseline.dimensions.length <= 6,
+      mockRecord.baseline.dimensions.every((d) => Number.isInteger(d.score) && d.score >= 0 && d.score <= 100),
+    ],
+    [true, true],
+  );
+  check(
+    '⑤ 铸出的链全在 draft 且进「待议」（定标没有给 AI 开后门）',
+    [
+      mockForged.questIds.every((id) => diagMockH.state.quests.byId[id].status === 'draft'),
+      chainsAwaitingReview(diagMockH.state).some((c) => c.id === mockForged.id),
+    ],
+    [true, true],
+  );
+  check('⑤ 素材里带着定标那句话（素材是读数，不是随手写的灵感）',
+    diagMockH.state.quests.byId[mockForged.questIds[0]].origin.sourceIdea.includes('【开局定标】'), true);
+
+  // —— ⑥ Live 轨道端到端 + 降级留痕：判分构不成基线时替身顶上、来源降级 ——
+  const liveDiagVerdictOut = {
+    levelLabel: '能读懂，但说不出成段的英文',
+    summary: '阅读底子还在；口语与听力没有成形的练习习惯。',
+    dimensions: [
+      { key: 'vocab', label: '词汇', score: 55 },
+      { key: 'speaking', label: '口语', score: 20 },
+      { key: 'listening', label: '听力', score: 35 },
+    ],
+    strengths: ['阅读坐得住'],
+    gaps: ['不敢开口', '听力没有练习量'],
+  };
+  const liveDiagH = harness(toLive(createMockState()), {
+    apiKey: T_KEY,
+    fetchImpl: makeFetch(
+      liveDiagSheetOut,
+      liveDiagVerdictOut,
+      liveDispatch('english_learner'),
+      liveClassOut([liveDraft(1), liveDraft(2), liveDraft(3)]),
+    ),
+  });
+  const liveDesign = await liveDiagH.thunks.designDiagnosis({ goalRaw: '我想把英语捡起来' });
+  check(
+    '⑥ Live 轨道 · 出题：走真身，改写稿逐字来自模型（不是悄悄换成替身）',
+    [liveDesign.ok, liveDesign.source, liveDiagH.state.diagnostics.active.goalReframed],
+    [true, 'api', liveDiagSheetOut.goalReframed],
+  );
+  check('⑥ Live：出题那一盏灯是"先亮灯 → 发请求 → 熄灯"', lampTrace(liveDiagH), [[0, 1]]);
+  liveDiagH.state = submitDiagnosisAnswers(
+    liveDiagH.state,
+    liveDiagH.state.diagnostics.active.questions.map((q, i) => ({
+      questionId: q.id,
+      text: q.kind === 'choice' ? q.options[0] : `实情 ${i + 1}`,
+    })),
+  );
+  const liveGrade = await liveDiagH.thunks.runDiagnosis();
+  check(
+    '⑥ Live 轨道 · 判分 + 铸链：基线与链都走真身，来源才是 api',
+    [liveGrade.ok, liveGrade.source, liveGrade.data.classId],
+    [true, 'api', 'english_learner'],
+  );
+  const liveRecord = liveDiagH.state.diagnostics.history.at(-1);
+  check(
+    '⑥ 落库的是真身判的那份基线（逐字），链也是模型铸的',
+    [liveRecord.baseline.levelLabel, liveRecord.baseline.dimensions.length,
+      liveDiagH.state.quests.chains[liveRecord.chainId].title],
+    [liveDiagVerdictOut.levelLabel, 3, '真身铸的链'],
+  );
+  const thinVerdictH = harness(toLive(createMockState()), {
+    apiKey: T_KEY,
+    fetchImpl: makeFetch(
+      liveDiagSheetOut,
+      { ...liveDiagVerdictOut, dimensions: [{ key: 'only', label: '独苗', score: 50 }] },
+      liveDispatch('english_learner'),
+      liveClassOut([liveDraft(1), liveDraft(2), liveDraft(3)]),
+    ),
+  });
+  await thinVerdictH.thunks.designDiagnosis({ goalRaw: '我想把英语捡起来' });
+  thinVerdictH.state = submitDiagnosisAnswers(
+    thinVerdictH.state,
+    thinVerdictH.state.diagnostics.active.questions.map((q, i) => ({
+      questionId: q.id,
+      text: q.kind === 'choice' ? q.options[0] : `实情 ${i + 1}`,
+    })),
+  );
+  const thinGradeRes = await thinVerdictH.thunks.runDiagnosis();
+  check(
+    '⑥ 判分构不成基线 → 替身顶上、来源降为 mock（真调用发生过，但落库的不是它给的）',
+    [thinGradeRes.ok, thinGradeRes.source, thinVerdictH.state.diagnostics.history.at(-1).baseline.dimensions.length >= 2],
+    [true, 'mock', true],
+  );
+
+  // —— ⑦ 提示词与接线：三张注册表、花名册、两段式调用点、UI 三屏 ——
+  const diagPrompt = promptText('70-diagnostician.md');
+  check(
+    '⑦ 70-diagnostician.md：两段输出契约与 schema 逐字对齐、禁止项在场、出处署名',
+    [
+      ['goalReframed', 'suggestedClassIds', 'levelLabel', 'dimensions', 'strengths', 'gaps'].every((k) => diagPrompt.includes(k)),
+      diagPrompt.includes('只读答案'),
+      diagPrompt.includes('CC BY-NC 4.0'),
+    ],
+    [true, true, true],
+  );
+  check(
+    '⑦ 三张注册表同指一份提示词；判分靠显式覆盖 schema（一个 Agent 的两副面孔）',
+    [
+      promptsIdx.SCHEMA_NAME_BY_KIND.diagnostician,
+      promptsIdx.PROMPT_FILE_MAP.diagnostician,
+      (promptsIdx.ROLE_PROMPTS.diagnostician ?? '').length > 200,
+      /schemaName:\s*'diagnosticVerdict'/.test(thunksSrc),
+    ],
+    ['diagnosticSheet', ['70-diagnostician.md'], true, true],
+  );
+  check(
+    '⑦ 花名册上那位（定标 · 测绘者）挂着同一份提示词文件',
+    cleanState.agents.records.some(
+      (a) => a.id === 'agent_diagnostician' && a.profile.systemPromptRef === '70-diagnostician.md',
+    ),
+    true,
+  );
+  check(
+    '⑦ thunks：素材由目标改写 + 基线拼成、铸链带着定标出处',
+    [thunksSrc.includes('composeDiagnosisIdea('), thunksSrc.includes("from: 'diagnosis'")],
+    [true, true],
+  );
+  const diagBountySrc = readFileSync(join(root, 'src/components/panels/BountyPanel.tsx'), 'utf8');
+  check(
+    '⑦ UI 接线：三屏在各就各位，冒烟转译插件对得上那句初始值字面量',
+    [
+      /useState<SparkMode>\('forge'\)/.test(diagBountySrc),
+      diagBountySrc.includes('designDiagnosis') && diagBountySrc.includes('runDiagnosis'),
+      diagBountySrc.includes('submitDiagnosisAnswers(') && diagBountySrc.includes('cancelDiagnosis('),
+      diagBountySrc.includes('export function DiagnosisBaselineCard'),
+    ],
+    [true, true, true, true],
   );
 
 } catch (err) {

@@ -12,4 +12,5 @@ export * from './world';
 export * from './endgame';
 export * from './achievements';
 export * from './agents';
+export * from './diagnostics';
 export * from './state';

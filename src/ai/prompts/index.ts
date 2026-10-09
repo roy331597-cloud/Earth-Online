@@ -25,10 +25,12 @@ import classInvestor from './21-class-investor.md?raw';
 import classInfluencer from './22-class-influencer.md?raw';
 import classEntrepreneur from './23-class-entrepreneur.md?raw';
 import blueprintGenerator from './24-class-blueprint-generator.md?raw';
+import classEnglish from './25-class-english.md?raw';
 import networkAdvisor from './30-network-advisor.md?raw';
 import arbiterPrompt from './40-arbiter.md?raw';
 import chainReviewer from './50-chain-reviewer.md?raw';
 import reroutePrompt from './60-reroute.md?raw';
+import diagnosticianPrompt from './70-diagnostician.md?raw';
 
 export const SHARED_CONTEXT = sharedContext;
 
@@ -38,6 +40,7 @@ export const CLASS_PROMPT_REF: Record<string, string> = {
   investor: classInvestor,
   social_media_influencer: classInfluencer,
   startup_entrepreneur: classEntrepreneur,
+  english_learner: classEnglish,
 };
 
 /**
@@ -56,6 +59,12 @@ export const ROLE_PROMPTS = {
   network_advisor: networkAdvisor,
   arbiter: arbiterPrompt,
   chain_reviewer: chainReviewer,
+  /**
+   * 定标师两段式共用这一份角色提示词：
+   * 出题段不传 schemaName（默认 diagnosticSheet），判分段的调用显式
+   * `schemaName: 'diagnosticVerdict'` 覆盖 —— 见 SCHEMA_NAME_BY_KIND 的注释。
+   */
+  diagnostician: diagnosticianPrompt,
 } as const;
 
 /** 供 Agent 注册表的 systemPromptRef 使用（相对 src/ai/prompts/） */
@@ -66,11 +75,13 @@ export const PROMPT_FILE_MAP: Record<AgentKind, string[]> = {
     '21-class-investor.md',
     '22-class-influencer.md',
     '23-class-entrepreneur.md',
+    '25-class-english.md',
   ],
   blueprints: ['24-class-blueprint-generator.md'],
   network_advisor: ['30-network-advisor.md'],
   arbiter: ['40-arbiter.md'],
   chain_reviewer: ['50-chain-reviewer.md'],
+  diagnostician: ['70-diagnostician.md'],
 };
 
 // ---------------------------------------------------------------------------
@@ -248,4 +259,7 @@ export const SCHEMA_NAME_BY_KIND = {
   network_advisor: 'networkAdviceOutput',
   arbiter: 'arbiterVerdict',
   blueprints: 'blueprintOutput',
+  // 定标师两段式的**默认**输出：出题。判分那一段在调用时以
+  // schemaName: 'diagnosticVerdict' 显式覆盖（与 rerouteDraft 同一手法）。
+  diagnostician: 'diagnosticSheet',
 } as const;

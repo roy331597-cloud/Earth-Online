@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { ChainSummaryBlock } from '@/components/panels/ChainFinale';
 import { FloatLayer, useFloatBursts } from '@/components/ui/ExpFloat';
 import { InlineError } from '@/components/ui/InlineError';
 import { attributeLabels } from '@/data/catalog/attributes';
@@ -217,7 +218,7 @@ export function TurnInSheet({ quest, onClose }: TurnInSheetProps) {
           </div>
         ) : (
           /* ------------------------------ 结算结果 ------------------------------ */
-          <div className="p-5">
+          <div className="max-h-[76vh] overflow-y-auto p-5 no-scrollbar">
             <div className="flex items-center gap-2">
               <span className="h-1.5 w-1.5 animate-dot-pulse rounded-full bg-amber-400" />
               <span className="text-[11px] tracking-[0.18em] text-amber-400/90">已结算</span>
@@ -292,6 +293,13 @@ export function TurnInSheet({ quest, onClose }: TurnInSheetProps) {
               <p className="mt-1.5 text-[11px] text-amber-200/85">
                 ＋{grantedPoints} 待分配点 · 去「人物属性」面板决定它长在哪一维。
               </p>
+            )}
+
+            {/* 末一步的追加总结（Phase 7 · 收官）：结算的这一刻是唯一一次
+                "当场"交代整条线得数的时刻。判据是链上的位置，不是 completed
+                —— 结算提交后链才会翻成走完，读取时两边都已经是新值。 */}
+            {quest.chain && quest.chain.index + 1 === quest.chain.total && (
+              <ChainSummaryBlock chainId={quest.chain.chainId} />
             )}
 
             <button

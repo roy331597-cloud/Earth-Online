@@ -66,7 +66,8 @@ export const ENDGAME_GOALS: EndgameGoal[] = [
     progress: 0,
     achieved: false,
     achievedAt: null,
-    drivenByClassIds: ['computational_biology', 'startup_entrepreneur'],
+    // 语言的钥匙（gm_language）在这条线上 —— 英语（Phase 7）的日常推进直接喂它
+    drivenByClassIds: ['computational_biology', 'startup_entrepreneur', 'english_learner'],
     visibleToPlayer: true,
   },
   {

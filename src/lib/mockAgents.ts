@@ -32,7 +32,12 @@ import type {
   ChainReviewOutput,
   ClassAgentOutput,
   ClassIdLiteral,
+  DiagnosticSheetInput,
+  DiagnosticSheetOutput,
+  DiagnosticVerdictInput,
+  DiagnosticVerdictOutput,
   DispatcherDecision,
+  ForgeCapacity,
   NetworkAdviceOutput,
   QuestDraft,
 } from '@/types';
@@ -59,7 +64,7 @@ const totalEffortOf = (drafts: QuestDraft[]): ClassAgentOutput['chain'] extends 
  * 别的字段照实填 —— `intentSummary` 用玩家自己的话截断，不编写一句"我理解你想……"
  * 的客套话：那句客套会一路走到 Class Agent 的 payload 里，最后影响生成质量。
  */
-export const mockDispatcherDecision = (idea: string): DispatcherDecision => {
+export const mockDispatcherDecision = (idea: string, capacity: ForgeCapacity = 'full'): DispatcherDecision => {
   const classId = routeClass(idea);
   const entry = getClass(classId);
   const trimmed = idea.trim();
@@ -80,7 +85,9 @@ export const mockDispatcherDecision = (idea: string): DispatcherDecision => {
       kind: 'chain',
       // 8 = PO 2026-10-09 口径（建议 8~40，上限 60）的下沿；与 thunks 的
       // directedDecision 取同一个数 —— 替身与真身对着同一把尺子说话。
-      suggestedChainLength: 8,
+      // 回档给 4（「三到五步」的中值）；轻档 8 不变 —— 本地轨道的实际链长
+      // 本来由池深决定（mockForge 的双口径注释），这里只是如实回声。
+      suggestedChainLength: capacity === 'relapse' ? 4 : 8,
       suggestedType: 'side',
     },
     linkedGoalIds: entry?.linkedGoalIds ?? [],
@@ -231,5 +238,96 @@ export const mockSolverOutput = (input: SolverInput): NetworkAdviceOutput => {
       reason: r.reason,
       approach: r.approach,
     })),
+  };
+};
+
+// ---------------------------------------------------------------------------
+// 定标师的替身（两段式：出题与判分各一个函数，中间隔着真人作答）
+// ---------------------------------------------------------------------------
+
+/**
+ * 出题替身。
+ *
+ * 它出的是**通用题面** —— 对任何目标都成立的四道题 —— 而不是假装读懂了目标。
+ * 替身没有语言能力，装出"为你量身出题"的样子只会更假；唯一用到目标原话的
+ * 地方是题面里的引用，让玩家认得出这是给他出的一张卷子。
+ *
+ * `suggestedClassIds` 用 `routeClass` 猜一次（与调度员同一张关键词表），
+ * 但**只在 `existingClasses` 名单里才给出** —— 契约本来也只许从这里挑；
+ * 猜不着就给空数组，宁可不说，不拿一个默认值冒充"AI 的建议"。
+ */
+export const mockDiagnosticSheet = (input: DiagnosticSheetInput): DiagnosticSheetOutput => {
+  const goal = input.goalRaw.trim();
+  const gist = goal.length <= 30 ? goal : `${goal.slice(0, 30)}…`;
+  const guess = routeClass(goal);
+  const known = input.existingClasses.some((c) => c.classId === guess);
+
+  return {
+    goalReframed: `把「${gist}」走成一件看得见的事：知道现在在哪、下一步往哪走、走完留下什么。`,
+    suggestedClassIds: known ? [guess] : [],
+    questions: [
+      {
+        kind: 'open',
+        prompt: `关于「${gist}」：写下你现在最真实的状况 —— 已经做过什么、做到什么程度、最近一次尝试的结果是什么。`,
+        options: [],
+      },
+      {
+        kind: 'open',
+        prompt: '写下你手头与这件事有关的一个具体困难（哪怕就是"不知道从哪开始"），并说说它让你卡了多久。',
+        options: [],
+      },
+      {
+        kind: 'choice',
+        prompt: '过去一个月，你为这件事实际动手过几次？',
+        options: ['四次以上，且留下了产物', '一两次，没留下什么', '想过，没动手', '还没开始'],
+      },
+      {
+        kind: 'choice',
+        prompt: '现在最挡路的是哪一样？',
+        options: ['不知道从哪开始', '开始了但坚持不住', '在做，但看不出进步', '有推进，缺一个更高的目标'],
+      },
+    ],
+  };
+};
+
+/**
+ * 判分替身。
+ *
+ * ⚠️ 它**判不了内容** —— 这一点必须诚实。本地轨道读不出"他答得对不对"，
+ *    只读得出**卷面信号**：答了几题、展开写了多少字。所以维度只给两条
+ *    （覆盖 / 详略），基线文案也只说卷面本身告诉了我们什么，
+ *    不替他伪造水准判断。真身（有 API Key 时）读到的是答案文本本身
+ *    （判据见 70-diagnostician.md：只读答案、不读心情）。
+ */
+export const mockDiagnosticVerdict = (input: DiagnosticVerdictInput): DiagnosticVerdictOutput => {
+  const total = input.questions.length;
+  const answered = input.answers.filter((a) => a.text.trim().length > 0);
+  const charTotal = answered.reduce((n, a) => n + a.text.trim().length, 0);
+  const unanswered = total - answered.length;
+
+  const coverage = Math.round((answered.length / Math.max(1, total)) * 100);
+  // 240 字封顶：一题写到这个量，卷面上能说的就都说了
+  const detail = Math.min(100, Math.round(charTotal / 2.4));
+
+  const levelLabel =
+    answered.length === 0
+      ? '卷面留空 · 起点未知'
+      : unanswered === 0
+        ? '卷面完整 · 起点待考'
+        : `答了 ${answered.length}/${total} · 起点部分未知`;
+
+  const gaps: string[] = [];
+  if (unanswered > 0) gaps.push(`还有 ${unanswered} 个测点没有作答 —— 那些位置的真实水平仍是未知数`);
+  if (answered.length > 0 && detail < 40) gaps.push('自述普遍简短，这份基线因此偏粗');
+
+  return {
+    levelLabel,
+    summary: `已记下你在这套卷子上的作答：${answered.length}/${total} 题有回应，共约 ${charTotal} 字。这份基线只量卷面本身 —— 答得越实，它越接近你的真实起点；留空的位置标为未知。`,
+    dimensions: [
+      { key: 'coverage', label: '卷面覆盖', score: coverage },
+      { key: 'detail', label: '自述详略', score: detail },
+    ],
+    strengths: answered.length === 0 ? [] : [`${answered.length} 条自述，可作起点的第一批证据`],
+    gaps,
   };
 };

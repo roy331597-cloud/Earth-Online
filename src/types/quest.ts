@@ -279,7 +279,19 @@ export interface QuestChain {
   createdAt: ISODateTime;
   /** 玩家审核记录（线级确认 / 打回；全部成员 resolve 后 reviewedAt 落定） */
   review: ChainReview;
+  /** 全部成员走完的**派生事实**（completeQuest 在同一链全 completed 时置真）。 */
   completed: boolean;
+  /**
+   * 玩家**主动收束**这条线的时间（CloseQuestChain；未收束为 null）。
+   *
+   * 与 `completed` 是两条轨道，别混淆：
+   *   - `completed` 是"链自己走完了"的派生事实 —— 机器判定，不可撤销；
+   *   - `closedAt`  是"玩家说这条线到此为止"的动作记录 —— 可以是走完之后
+   *     补记的收束，也可以是半途叫停（此时 `completed` 保持 false，
+   *     未完成的成员转 `abandoned` 归档）。
+   * 收官界面的两态文案（「走完了」/「在这里收束」）就按这两个字段判。
+   */
+  closedAt: ISODateTime | null;
 }
 
 // ---------------------------------------------------------------------------

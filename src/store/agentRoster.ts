@@ -2,8 +2,8 @@
 // EarthOnline · 出厂清场 · Agent 花名册（mock 与生产初始档的共享件）
 //
 // 这份名单原先长在 `mockState.ts` 里。清场时它被提出来，理由只有一个：
-// **mock 存档与玩家的新建存档必须挂着同一份花名册** —— 调度、四个职业
-// Agent、蓝图铸造者、社交智囊、复盘判官、审核官，是出厂阵容，不是测试数据。
+// **mock 存档与玩家的新建存档必须挂着同一份花名册** —— 调度、职业
+// Agent、蓝图铸造者、社交智囊、复盘判官、审核官、定标师，是出厂阵容，不是测试数据。
 //
 // 清单挪了窝，值一个字都没动：人名、题记、温度、注入策略、prompt 文件名、
 // promptVersion 全部与提取前逐字相同（提取时对着原文件抄，mock 的 991 条
@@ -116,6 +116,7 @@ export function createAgentRoster(createdAt: ISODateTime): AgentRecord[] {
     classAgent('investor', 'agent_class_investor', '21-class-investor.md'),
     classAgent('social_media_influencer', 'agent_class_influencer', '22-class-influencer.md'),
     classAgent('startup_entrepreneur', 'agent_class_entrepreneur', '23-class-entrepreneur.md'),
+    classAgent('english_learner', 'agent_class_english', '25-class-english.md'),
     mkAgent({
       id: 'agent_blueprints',
       kind: 'blueprints',
@@ -159,6 +160,17 @@ export function createAgentRoster(createdAt: ISODateTime): AgentRecord[] {
       temperature: 0.3,
       journalWindow: 3,
       injection: { includeActiveQuests: true, includeCareerStats: true },
+    }),
+    mkAgent({
+      id: 'agent_diagnostician',
+      kind: 'diagnostician',
+      displayName: '定标 · 测绘者',
+      tagline: '我不替你做决定，我只把你的起点量出来。',
+      promptRef: '70-diagnostician.md',
+      temperature: 0.3,
+      // 定标看的是"这个人现在在哪"：属性与职业线等级在场；
+      // 金库、人脉、在手任务一概不进 —— 起点不该被无关的近况带偏
+      injection: { includeVaultSummary: false, includeActiveQuests: false, includeNetworkSummary: false },
     }),
   ];
 }

@@ -242,6 +242,9 @@ export type ClassIdLiteral =
   | 'investor'
   | 'social_media_influencer'
   | 'startup_entrepreneur'
+  // 英语线（Phase 7 · up 迁移）：第五条初始线 —— 「通往雅思 7.0 的长期线」。
+  // 与另外四条同一时刻建角就位（见 newGameState 的 careers.tracks）。
+  | 'english_learner'
   | (string & {});
 
 /** 头衔阶梯中的一档，例：Lv.1-9 为「湿实验学徒」 */

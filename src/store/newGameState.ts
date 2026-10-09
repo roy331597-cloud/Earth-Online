@@ -119,7 +119,7 @@ export function createNewGameState(now: Date = new Date()): EarthOnlineState {
     },
 
     careers: {
-      // 四条初始职业线**全部在场**（目录说的是「初始 4 条」），
+      // 五条初始职业线**全部在场**（目录说的是「初始 5 条」），
       // 只是全部停在 Lv.1 / 0 EXP —— 不是"未解锁"，是"还没开始动"。
       tracks: CLASSES.map((entry) => ({
         classId: entry.classId,
@@ -246,6 +246,9 @@ export function createNewGameState(now: Date = new Date()): EarthOnlineState {
       monthlyExpGranted: {},
       introducedToPlayer: false,
     },
+
+    // 没有进行中的定标、没有一份基线 —— 空档里没有人被量过起点
+    diagnostics: { active: null, history: [] },
 
     agents: {
       // 花名册是出厂阵容，不是测试数据 —— 但每一个的账都是零：

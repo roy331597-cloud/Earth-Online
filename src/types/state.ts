@@ -18,6 +18,7 @@ import type { ChapterProgressState, EndgameState, EvolutionTreeState } from './e
 import type { Unlockables } from './achievements';
 import type { WorldState } from './world';
 import type { AgentState, AiRuntimeState } from './agents';
+import type { DiagnosticsState } from './diagnostics';
 
 // ---------------------------------------------------------------------------
 // 1. 存档元数据
@@ -71,6 +72,15 @@ export interface EarthOnlineState {
   network: NetworkState;
   /** 现实里程碑：真实世界已发生事件（签证/旅行/论文接收……）的记录 */
   milestones: MilestonesState;
+  /**
+   * 开局定标：进行中的卷面 + 已结束的基线档案。
+   *
+   * ⚠️ 它必须进存档（而不是留在组件 state 里）：定标是"写目标 → 出题 →
+   *    真人作答 → 判分"的长流程，中间隔着一次 AI 调用与一段写字的时间。
+   *    卷子只活在内存里的话，任何一次刷新都会把玩家已经付出的那半程丢掉
+   *    —— 先例是 TurnInSheet 的 turn_in_pending（结算中间态同样入库）。
+   */
+  diagnostics: DiagnosticsState;
 
   // —— AI ——
   agents: AgentState;
@@ -534,6 +544,72 @@ export type RegenerateQuestChain = (
 ) => EarthOnlineState;
 
 /**
+ * 开局定标 · 起卷：把玩家的目标原话与一份**已收口的考卷**落成进行中的记录。
+ *
+ * 考卷由调用方（thunk）出好再递进来 —— 与 RegenerateQuestChain 的 `forged`
+ * 同一条接缝哲学：纯函数层不碰 AI，只负责把已经存在的东西安放进状态机。
+ * 出题那一步失败时压根不该走到这里（没有卷子就没有记录，刷新不会留下
+ * 一条"空卷"让玩家对着发呆）。
+ *
+ * ⚠️ 约定：目标为空、或卷面没有任何题目 → 原引用返回（无事发生不写盘）。
+ * 已有进行中的定标时**覆盖**为新的这一次 —— 起卷是玩家的明确动作，
+ * 旧卷的放弃要走 CancelDiagnosis，不该被静默吞掉（UI 层负责先劝一句）。
+ */
+export type BeginDiagnosis = (
+  state: EarthOnlineState,
+  goalRaw: string,
+  sheet: import('./diagnostics').DiagnosticSheet,
+  now: Date,
+) => EarthOnlineState;
+
+/**
+ * 开局定标 · 交卷：把作答写进进行中的定标记录（status 保持 awaiting_answers，
+ * 判分是紧随其后的另一次调用，其间刷新页面不能把人打回空白卷）。
+ *
+ * ⚠️ 没有进行中的记录、或记录已结束 → 原引用返回。
+ * 重复交卷（awaiting_answers 期间再次调用）**允许覆盖** —— 玩家改主意重写
+ * 一段答案是正当的，且覆盖前的那一版没有别的消费者。
+ */
+export type SubmitDiagnosisAnswers = (
+  state: EarthOnlineState,
+  answers: import('./diagnostics').DiagnosticAnswer[],
+  now: Date,
+) => EarthOnlineState;
+
+/**
+ * 开局定标 · 落定：写基线、回填链 id、把记录归档进 history（status → completed）。
+ *
+ * 基线与 chainId 一起落，是因为**铸链排在判分之后**（见 ai/thunks 的 runDiagnosis）：
+ * 判分出短板 → 短板拼进 idea → forgeChain 铸出链 id → 到这里一次性写回。
+ * 链的产出照旧全部落在 draft 待议 —— 定标不是给 AI 开后门，铸造 ≠ 生效。
+ */
+export type CompleteDiagnosis = (
+  state: EarthOnlineState,
+  baseline: import('./diagnostics').DiagnosticBaseline,
+  chainId: import('./core').ChainId | null,
+  now: Date,
+) => EarthOnlineState;
+
+/**
+ * 开局定标 · 放弃：把进行中的记录以 cancelled 归档，卷面清空。
+ * 随时可退是这条流程的底线 —— 定标是邀请，不是关卡。
+ */
+export type CancelDiagnosis = (state: EarthOnlineState, now: Date) => EarthOnlineState;
+
+/**
+ * 收束一条线：玩家说"这条线到此为止"。
+ *
+ * 与"走完"（chain.completed，completeQuest 派生的机器事实）是两条轨道：
+ *   - 全成员走完后再收束 = 补记一个完成时刻（收官的「这条线，走完了」）；
+ *   - 半途收束 = 未完成的成员（draft/offered/claimed/active）转 `abandoned`
+ *     并进归档名单，链记 closedAt、completed 保持 false（「这条线，在这里收束」）。
+ *
+ * 三处守卫一律**原引用返回**：链不存在；链已 completed 且已 closedAt（重复收束）；
+ * 链内还有 `turn_in_pending` 的成员（那一步正在结算桌上，先把它结掉再来）。
+ */
+export type CloseQuestChain = (state: EarthOnlineState, chainId: string, now: Date) => EarthOnlineState;
+
+/**
  * 记录一个现实里程碑（签证递交/获批、出国旅行、论文接收……）。
  * 不走任务状态机、不经过 AI：校验冷却与月度上限后直接发 EXP，
  * 并点亮 grantsGoalMilestoneIds 中尚未达成的终极目标里程碑。
@@ -732,8 +808,14 @@ export type BuildHudSnapshot = (state: EarthOnlineState, now: Date) => import('.
  * `deepseek-chat` 换成 `deepseek-flash`。线上调用取的是 `ai.model`
  * （它压过一切出厂默认，见 bus.ts）—— 老档里**等于旧默认值**的那一份，
  * 迁移时跟着换代；其余模型名一个字不动（那才可能是谁挑过的立场）。
+ *
+ * v8（2026-10-09 开局定标 · Phase 7）：QuestChain 加 `closedAt`（玩家主动
+ * 收束的动作记录，与 completed 的"走完"双轨并存）；顶层新增 `diagnostics`
+ * 容器（进行中的卷面 + 基线档案）。老档每条链补 `closedAt: null`、
+ * diagnostics 补空容器 —— **不补造任何一次定标**：那些档里没有人被定标过，
+ * 编一份基线出来就是在档案上写一个假的起点。
  */
-export const CURRENT_SCHEMA_VERSION = 7;
+export const CURRENT_SCHEMA_VERSION = 8;
 
 /**
  * 迁移注册表。每一次结构性变更都必须新增一条迁移，禁止原地改老迁移。

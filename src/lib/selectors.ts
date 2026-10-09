@@ -233,6 +233,46 @@ export const chainsAwaitingReview = (state: EarthOnlineState): QuestChain[] =>
     chain.questIds.some((id) => state.quests.byId[id]?.status === 'draft'),
   );
 
+// ---------------------------------------------------------------------------
+// 3.4 停滞与回航（Phase 7 · up 迁移）
+// ---------------------------------------------------------------------------
+
+/** 停航的判定线：距最近一次**完成**任务 ≥ 这么多整天。 */
+export const STALLED_DAYS = 3;
+
+/**
+ * 最近一次完成任务的时刻 —— 从未完成过返回 null。
+ *
+ * 只看 `completedAt`：领取、开始、挂起、待结算都不算"动过"。回航这条路的
+ * 判据是"很久没有真的走完一件事"，不是"很久没点开 App" ——
+ * 后者会惩罚只是来看看的人，而这个产品不做那种事。
+ */
+export const lastCompletionAt = (state: EarthOnlineState): ISODateTime | null =>
+  state.quests.order.reduce<ISODateTime | null>((latest, id) => {
+    const at = state.quests.byId[id]?.completedAt ?? null;
+    return at !== null && (latest === null || at > latest) ? at : latest;
+  }, null);
+
+/** 距最近一次完成过了几天；从未完成过返回 null（而不是 0） */
+export const daysSinceLastCompletion = (state: EarthOnlineState, now: Date): number | null => {
+  const at = lastCompletionAt(state);
+  return at === null ? null : daysBetween(at, now);
+};
+
+/**
+ * 是否该请玩家「回航」。
+ *
+ * ⚠️ **从未完成过任何任务 → false**：第一天打开 App 的人不是"停滞"，
+ *    他还没起航。把"没有记录"当成"停了很久"，回航按钮会在每个新档上亮着 ——
+ *    那是在第一天就催他，恰是共享上下文里禁止的那种事。
+ * ⚠️ 也**不看**手上有多少任务：手里堆着十件没动的不算"动过"，
+ *    全部做完然后歇了三天才算停航。两种信息的区别，就是这条判据的全部价值。
+ */
+export const isStalled = (state: EarthOnlineState, now: Date): boolean => {
+  const days = daysSinceLastCompletion(state, now);
+  return days !== null && days >= STALLED_DAYS;
+};
+
 export const todayKey = (now: Date): DateKey => localDateKey(now);
 
 export const checkedDailyIds = (state: EarthOnlineState, now: Date): ReadonlySet<DailyId> => {

@@ -42,6 +42,12 @@
 - `recommendDeepDeduction`：当想法复杂、跨领域、或玩家历史上有烂尾倾向时，
   建议开启深度推演（会由另一位审核官二次审阅）。给一句人话理由。
 
+**容量档**（`capacity` 字段，默认 `full`）——它约束的是"这次给多厚"：
+- `full`：照常判断（建议 8~40 步、上限 60 步）。
+- `light`：玩家这阵子力气小。步数往短里给，每步 15 ~ 30 分钟、当天轻松可完。
+- `relapse`：玩家停了很久，只要一条**三到五步**的最小恢复链（`suggestedChainLength` 给 4），
+  第一步不需要任何前置。不要借机补课、不要给"完整方案"。
+
 ### 第四步：目标挂钩
 从五个终极目标中选出**真实成立**的关联。宁可少选，不要硬凑。
 `SOULMATE` 只在想法确实涉及关系时才勾选。
@@ -55,7 +61,7 @@
   "intentSummary": "一句话归纳（≤40字）",
   "language": "zh",
   "routing": {
-    "primaryClass": "computational_biology 或 investor 或 social_media_influencer 或 startup_entrepreneur 或 NEW",
+    "primaryClass": "computational_biology 或 investor 或 social_media_influencer 或 startup_entrepreneur 或 english_learner 或 NEW",
     "primaryConfidence": 0.87,
     "secondaryClassIds": [],
     "rationale": "为什么这样归属（≤60字）"
@@ -103,7 +109,7 @@
 
 输入：
 ```json
-{ "rawIdea": "我想试试能不能靠写东西赚到第一笔钱", "existingClasses": [{"classId": "social_media_influencer", "displayName": "Social Media Influencer"}, {"classId": "startup_entrepreneur", "displayName": "Startup Entrepreneur"}] }
+{ "rawIdea": "我想试试能不能靠写东西赚到第一笔钱", "existingClasses": [{"classId": "social_media_influencer", "displayName": "Social Media Influencer"}, {"classId": "startup_entrepreneur", "displayName": "Startup Entrepreneur"}, {"classId": "english_learner", "displayName": "English Learner"}] }
 ```
 
 输出：

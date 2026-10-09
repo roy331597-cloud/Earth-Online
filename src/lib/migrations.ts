@@ -287,4 +287,45 @@ export const MIGRATIONS: MigrationRegistry = {
 
     return { ...prev, meta, ai };
   },
+
+  // v7 → v8（开局定标 · Phase 7）：两处补空，不搬动任何已有数据。
+  //
+  //   · QuestChain.closedAt —— 老档里的链没有人收束过，一律 null。
+  //     ⚠️ 它和 `completed` 是两条轨道：completed 别动。走完的链补一个
+  //     closedAt 看起来"更完整"，但那是替玩家点了「收束」—— 收束是一个
+  //     动作的痕迹，没发生过就不能造（与 v6 不补造成就日期同一条纪律）。
+  //
+  //   · diagnostics —— 新增容器。补 `{active: null, history: []}`：
+  //     老档里没有人被定标过。**不补造任何一份基线**：编一个起点出来，
+  //     就是在档案里写一句玩家从没说过的话。
+  8: (prev, now) => {
+    const quests = asRecord(prev.quests);
+    const chainsPrev = asRecord(quests.chains);
+    const chains: Record<string, unknown> = {};
+    for (const [id, c] of Object.entries(chainsPrev)) {
+      const chain = asRecord(c);
+      if (typeof chain.closedAt !== 'string' && chain.closedAt !== null) chain.closedAt = null;
+      chains[id] = chain;
+    }
+
+    const meta = asRecord(prev.meta);
+    meta.schemaVersion = 8;
+    const history = Array.isArray(meta.migrationHistory) ? meta.migrationHistory : [];
+    meta.migrationHistory = [
+      ...history,
+      {
+        from: 7,
+        to: 8,
+        at: now.toISOString(),
+        notes: '补 QuestChain.closedAt: null 与 diagnostics 空容器（不补造任何一次定标）',
+      },
+    ];
+
+    return {
+      ...prev,
+      meta,
+      quests: { ...quests, chains },
+      diagnostics: { active: null, history: [] },
+    };
+  },
 };

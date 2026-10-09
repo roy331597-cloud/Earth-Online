@@ -1,13 +1,15 @@
 import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
+import { ChainFinale, finaleMembers } from '@/components/panels/ChainFinale';
 import { PanelShell } from '@/components/panels/PanelShell';
 import { TurnInSheet } from '@/components/panels/TurnInSheet';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { PanelTabs } from '@/components/ui/PanelTabs';
 import { classLabelOf } from '@/data/catalog/classes';
 import { cn } from '@/lib/cn';
 import { formatUsd } from '@/lib/format';
 import { previewRoute } from '@/lib/mockForge';
-import { composeCommissionBrief } from '@/lib/questBriefs';
+import { composeCommissionBrief, composeReturnBrief } from '@/lib/questBriefs';
 import type { PanelKey } from '@/lib/panels';
 import {
   QUEST_REWARD_TIERS,
@@ -15,23 +17,36 @@ import {
   REROUTE_REQUEST_MAX_LEN,
 } from '@/data/catalog/policy';
 import type { QuestRewardTierKey } from '@/data/catalog/policy';
-import { chainsAwaitingReview, claimableQuests, inHandQuests, questsByStatus } from '@/lib/selectors';
+import {
+  activeTrack,
+  chainsAwaitingReview,
+  claimableQuests,
+  inHandQuests,
+  isStalled,
+  questsByStatus,
+} from '@/lib/selectors';
 import { useAgentAction } from '@/hooks/useAgentAction';
+import { useNow } from '@/hooks/useNow';
 import { InlineError } from '@/components/ui/InlineError';
 import { thunks } from '@/store/agentRuntime';
 import {
+  REROUTABLE_STATUSES,
+  cancelDiagnosis,
+  canCloseQuestChain,
   chainsAwaitingRegeneration,
   claimQuest,
+  closeQuestChain,
   confirmQuestChain,
   createManualQuest,
   openTurnIn,
   rejectQuestChain,
   startQuest,
+  submitDiagnosisAnswers,
   successorOf,
   type RegenerationCandidate,
 } from '@/store/operations';
 import { useMutate, useSave } from '@/store/useEarthOnlineStore';
-import type { ClassIdLiteral, Quest, QuestChain } from '@/types';
+import type { ClassIdLiteral, DiagnosticRecord, ForgeCapacity, Quest, QuestChain } from '@/types';
 
 type BountyTab = 'board' | 'active' | 'review' | 'spark';
 
@@ -167,16 +182,25 @@ function BoardTab({
   onGoToActive: () => void;
 }) {
   const save = useSave();
+  const now = useNow();
   const [writing, setWriting] = useState(false);
   const [justWrote, setJustWrote] = useState(false);
   const { busy, error, run, clearError } = useAgentAction();
+  // 回航单开一份动作状态：两个按钮各自按各自的忙碌说话 ——
+  // 借一份 busy 共用，会让"正在铺回归路"和"调度员在看近况"互相冒充。
+  const sail = useAgentAction();
+  const anyBusy = busy || sail.busy;
 
   // 素材取不到（五个目标全达成了）时按钮就该是灰的 —— 不拿一句假的处境去出题
   const canCommission = composeCommissionBrief(save) !== null;
 
+  // 回航只在真的停过之后出现：完成过、且 ≥3 天没完成任何一步（selectors.isStalled）。
+  // 第一天的新玩家看不到它 —— 那不是停滞，是还没起航。
+  const stalled = isStalled(save, now);
+
   const commission = () => {
     const brief = composeCommissionBrief(save);
-    if (brief === null || busy) return;
+    if (brief === null || anyBusy) return;
     setJustWrote(false);
     void run(async () => {
       const result = await thunks.forgeChain({
@@ -191,23 +215,57 @@ function BoardTab({
     });
   };
 
+  // 回航：照最近搁下的那条线铺一条最小的恢复链（capacity='relapse'，
+  // 链长与每步时长的口径在 dispatcher / class 两条 payload 通道上，
+  // 不拼进这句素材 —— 见 questBriefs.composeReturnBrief 的注释）。
+  // 线取当前高亮的那条：回来走的路应当是自己原本在走的那条；
+  // 一条职业线都没有时交给调度员路由。
+  const returnSail = () => {
+    if (anyBusy) return;
+    setJustWrote(false);
+    void sail.run(async () => {
+      const result = await thunks.forgeChain({
+        idea: composeReturnBrief(save),
+        classId: activeTrack(save)?.classId ?? null,
+        capacity: 'relapse',
+        deepDeliberation: false,
+        from: 'return',
+      });
+      if (result.ok) onGoToReview();
+      return result;
+    });
+  };
+
   return (
     <div className="space-y-3 pt-3.5">
       {/* 板子的两个常驻来源：系统按处境出题 / 自己写一条 */}
       <div className="flex flex-wrap gap-1.5">
         <button
           type="button"
-          disabled={!canCommission || busy}
+          disabled={!canCommission || anyBusy}
           onClick={commission}
           className={cn(
             'rounded-lg border px-3 py-2 text-[11.5px] transition-all duration-300 ease-cinematic',
-            canCommission && !busy
+            canCommission && !anyBusy
               ? 'border-abyss-400/45 bg-abyss-500/[0.12] text-abyss-300 hover:scale-[1.03] hover:bg-abyss-500/[0.22]'
               : 'cursor-not-allowed border-white/10 bg-white/[0.04] text-white/30',
           )}
         >
           {busy ? '调度员正在看你的近况…' : '让调度员出题'}
         </button>
+        {stalled && (
+          <button
+            type="button"
+            disabled={anyBusy}
+            onClick={returnSail}
+            className={cn(
+              'glass-pill px-3 py-2 text-[11.5px] text-amber-200/85',
+              anyBusy ? 'cursor-not-allowed opacity-60' : 'glass-hover',
+            )}
+          >
+            {sail.busy ? '正在铺一条最短的回归路…' : '回航'}
+          </button>
+        )}
         <button
           type="button"
           aria-expanded={writing}
@@ -226,8 +284,14 @@ function BoardTab({
       <p className="text-[10.5px] leading-relaxed text-white/30">
         调度员出的题落在「待议」等你裁决；自己写的那条直接进「进行中」。
       </p>
+      {stalled && (
+        <p className="text-[10.5px] leading-relaxed text-white/30">
+          「回航」不问你为什么停：照上次搁下的地方，铺一条最短的路，先动起来。
+        </p>
+      )}
 
       {error && <InlineError message={error} onDismiss={clearError} />}
+      {sail.error && <InlineError message={sail.error} onDismiss={sail.clearError} />}
 
       {writing && (
         <ManualQuestForm
@@ -489,8 +553,15 @@ function ReviewTab({ chains, onGoToSpark }: { chains: QuestChain[]; onGoToSpark:
   // 整条链都被打回的那些 —— 它们是「整链重抽」唯一的入口。
   // 判据在 operations 里有一份对应的守卫，两边必须一致（见 chainsAwaitingRegeneration）
   const rebuildable = chainsAwaitingRegeneration(save);
+  // 已收束的线（Phase 7）：closedAt 非空。最新收束的排前面 ——
+  // 刚停下的那条，多半就是想再看一眼的那条。
+  const closed = Object.values(save.quests.chains)
+    .filter((c) => c.closedAt !== null)
+    .sort((a, b) => (b.closedAt ?? '').localeCompare(a.closedAt ?? ''));
+  // 收官抽屉打开的是哪条链（按 id 存，不存对象 —— 与结算面板同一个理由）
+  const [finaleId, setFinaleId] = useState<string | null>(null);
 
-  if (chains.length === 0 && rebuildable.length === 0) {
+  if (chains.length === 0 && rebuildable.length === 0 && closed.length === 0) {
     return (
       <EmptyNote
         text="没有待议的东西。AI 给的线在确认之前都停在这里 —— 板子干净，说明该做的判断你都做完了。"
@@ -523,7 +594,58 @@ function ReviewTab({ chains, onGoToSpark }: { chains: QuestChain[]; onGoToSpark:
           ))}
         </Group>
       )}
+
+      {closed.length > 0 && (
+        <Group
+          title="已收束"
+          hint="你亲手停下过的线。停止也是完成 —— 想回顾它们走完了什么，点开收官。"
+        >
+          {closed.map((c) => (
+            <ClosedChainCard key={c.id} chain={c} onOpenFinale={() => setFinaleId(c.id)} />
+          ))}
+        </Group>
+      )}
+
+      {finaleId && <ChainFinale chainId={finaleId} onClose={() => setFinaleId(null)} />}
     </div>
+  );
+}
+
+/**
+ * 一条已收束的线。
+ *
+ * 它是「已收束」组里的一行：链名、走过多少步、一颗「看收官」。
+ * 之所以值得存在：收束是玩家亲手做的决定，而**决定需要能回看** ——
+ * 没有这行字，"停止也是完成"这句话就只是一句安慰，没有落点。
+ */
+function ClosedChainCard({ chain, onOpenFinale }: { chain: QuestChain; onOpenFinale: () => void }) {
+  const save = useSave();
+  const members = finaleMembers(save, chain);
+  const done = members.filter((q) => q.status === 'completed').length;
+
+  return (
+    <article className="glass-hover rounded-xl border border-white/10 bg-white/[0.03] p-3">
+      <div className="flex items-center gap-2">
+        <span className="rounded-md border border-abyss-500/30 bg-abyss-500/15 px-1.5 py-0.5 text-[10px] leading-[1.4] text-abyss-300">
+          {classLabelOf(chain.classId)}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium tracking-wide text-white/85">
+          {chain.title}
+        </span>
+        <span className="numeric shrink-0 text-[10px] text-white/35">
+          走过 {done}/{members.length} 步
+        </span>
+      </div>
+      <div className="mt-2 flex">
+        <button
+          type="button"
+          onClick={onOpenFinale}
+          className="glass-pill glass-hover ml-auto px-2.5 py-1.5 text-[11px] text-white/60"
+        >
+          看收官
+        </button>
+      </div>
+    </article>
   );
 }
 
@@ -729,6 +851,97 @@ function CardShell({
   );
 }
 
+/**
+ * 「换个做法」的四选一原因（Phase 7 · 执行中也能打回）。
+ *
+ * `label` 是按钮上的两个字，`request` 是真正写进诉求的展开句 ——
+ * 模型看得懂"这一步摊得太大"，但看不懂"太大"。落进 RerouteRecord.request
+ * 的永远是展开句，玩家翻留档时读到的也是完整的一句话。
+ */
+const REROUTE_REASONS: ReadonlyArray<{ key: string; label: string; request: string }> = [
+  { key: 'too_big', label: '太大', request: '这一步摊得太大' },
+  { key: 'too_vague', label: '太糊', request: '这一步说得太糊' },
+  { key: 'blocked', label: '条件不足', request: '现在条件不足' },
+  { key: 'refuse', label: '不想做', request: '就是不想做这一版' },
+];
+
+/**
+ * 「换个做法」的共享输入匣：悬赏板（offered）与「进行中」（claimed / active）
+ * 两张卡片共用 —— 同一件事在两种处境里发生，就该长同一副样子。
+ *
+ * 原因**必填**：旧版的空诉求一律按"排得太满"处理，而"太糊"和"不想做"要的
+ * 是两种不同的改法（具体化 vs 换一条路）—— 不问清楚，改出来就有一半概率
+ * 答非所问。补充框的余量随所选原因收窄：诉求总长守 REROUTE_REQUEST_MAX_LEN，
+ * 末尾不被静默截掉。
+ */
+function RerouteBox({ quest, remaining, onClose }: { quest: Quest; remaining: number; onClose: () => void }) {
+  const { busy, error, run, clearError } = useAgentAction();
+  const [reasonKey, setReasonKey] = useState<string | null>(null);
+  const [extra, setExtra] = useState('');
+
+  const reason = REROUTE_REASONS.find((r) => r.key === reasonKey) ?? null;
+  const extraCap = reason
+    ? Math.max(0, REROUTE_REQUEST_MAX_LEN - reason.request.length - 1)
+    : REROUTE_REQUEST_MAX_LEN;
+
+  const submit = () => {
+    if (!reason || busy) return;
+    const trimmed = extra.trim().slice(0, extraCap);
+    const request = trimmed.length > 0 ? `${reason.request}：${trimmed}` : reason.request;
+    void run(async () => {
+      const result = await thunks.reroute({ questId: quest.id, request });
+      if (result.ok) onClose();
+      return result;
+    });
+  };
+
+  return (
+    <div
+      className="mt-3 animate-fade-up rounded-xl border border-abyss-500/30 bg-abyss-500/[0.07] p-2.5"
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') onClose();
+      }}
+    >
+      <div className="flex items-baseline gap-2">
+        <span className="text-[10.5px] tracking-wider text-abyss-300/85">换个做法</span>
+        <span className="numeric ml-auto text-[10px] text-white/30">本条链还剩 {remaining} 次</span>
+      </div>
+      <p className="mt-1 text-[10.5px] leading-relaxed text-white/40">
+        目的地不变，只换这一步怎么走。先说它卡在哪儿。
+      </p>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {REROUTE_REASONS.map((r) => (
+          <Chip key={r.key} active={reasonKey === r.key} onClick={() => setReasonKey(r.key)}>
+            {r.label}
+          </Chip>
+        ))}
+      </div>
+      <div className="mt-2 flex gap-1.5">
+        <input
+          type="text"
+          value={extra}
+          maxLength={extraCap}
+          onChange={(e) => setExtra(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') submit();
+          }}
+          placeholder="再补一句（选填）"
+          className="min-w-0 flex-1 rounded-lg border border-white/[0.12] bg-ink-950/55 px-2.5 py-1.5 text-[11.5px] text-white placeholder:text-white/25 focus:border-abyss-400/50 focus:outline-none focus:ring-1 focus:ring-abyss-400/30"
+        />
+        <button
+          type="button"
+          disabled={!reason || busy}
+          onClick={submit}
+          className="shrink-0 rounded-lg border border-abyss-400/50 bg-abyss-500/20 px-3 py-1.5 text-[11.5px] text-abyss-300 transition-all duration-300 ease-cinematic hover:bg-abyss-500/[0.32] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {busy ? '…' : '换'}
+        </button>
+      </div>
+      {error && <InlineError message={error} onDismiss={clearError} />}
+    </div>
+  );
+}
+
 /** 链上每一步在审核卡上的状态词。没写的就是「待裁决」—— 不额外加一行噪音 */
 const STEP_STATUS_LABEL: Partial<Record<Quest['status'], string>> = {
   offered: '已通过',
@@ -741,10 +954,15 @@ const STEP_STATUS_LABEL: Partial<Record<Quest['status'], string>> = {
 /**
  * 一条待裁决的线（轮 C 的线级审核卡）。
  *
- * 两个出口，不是三个：
+ * 三个出口，各有各的处境（Phase 7 起第三个）：
  *   确认这条线 —— 整条线就这么走。确认后只有第一步落在悬赏板上
  *   打回重来   —— 整条线都不对。全否之后它会出现在「推倒重来」里，
  *                 还留着终身一次的整链重抽
+ *   收束这条线 —— 我不想走这条线，也不想重抽它。（Phase 7）
+ *                 它是"打回"的对岸：打回说"这批不行、换一批试试"，
+ *                 收束说"这件事到此为止"。停止也是完成 ——
+ *                 一条从没被确认过的线，也配得上一个体面的落点，
+ *                 而不是永远挂在「待议」里等我裁决。
  *
  * 为什么把逐条裁决收成一次：
  *   玩家在确认时看到的是整条线的形状 —— 主题、理由、每一步的标题。
@@ -760,6 +978,11 @@ function LineReviewCard({ chain }: { chain: QuestChain }) {
   const save = useSave();
   const mutate = useMutate();
   const [confirming, setConfirming] = useState(false);
+  const [closeAsk, setCloseAsk] = useState(false);
+
+  // 收束入口只在真的收得了的时候亮（守卫与 closeQuestChain 逐条对应）——
+  // 一颗点了没反应的按钮，比没有按钮更伤信任
+  const closeGate = canCloseQuestChain(save, chain.id);
 
   // 链上还站着的步骤。被打回 / 被换掉的已经从线上退场（痕迹留在状态里），
   // 不再出现在这张卡上 —— 卡上列出的，是确认之后真正会走的那条路
@@ -845,6 +1068,15 @@ function LineReviewCard({ chain }: { chain: QuestChain }) {
           </>
         ) : (
           <>
+            {closeGate.ok && (
+              <button
+                type="button"
+                onClick={() => setCloseAsk(true)}
+                className="glass-pill glass-hover px-2.5 py-1.5 text-[11.5px] text-white/60"
+              >
+                收束这条线
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setConfirming(true)}
@@ -862,6 +1094,19 @@ function LineReviewCard({ chain }: { chain: QuestChain }) {
           </>
         )}
       </div>
+
+      <ConfirmDialog
+        open={closeAsk}
+        question="这条线就走到这里？"
+        subject={chain.title}
+        detail="收束不是失败 —— 停止也是完成。还没走的步骤会转成「搁下」归档，走过的部分一步都不会白走。想回顾时，它躺在「已收束」里，点开就是收官。"
+        confirmLabel="收束"
+        onConfirm={() => {
+          setCloseAsk(false);
+          mutate((s) => closeQuestChain(s, chain.id, new Date()));
+        }}
+        onCancel={() => setCloseAsk(false)}
+      />
     </article>
   );
 }
@@ -872,8 +1117,9 @@ function LineReviewCard({ chain }: { chain: QuestChain }) {
  * 轮 C 起它同时是"被揭开的那一步"的完整模样 —— 所以卡上带着两样东西：
  *   ① 这一步到底要做什么（objective）。确认那条线时只看到了标题，
  *      真正决定接不接的时刻是现在，不是那时。
- *   ② 「换个做法」。线确认过之后，单步的修理发生在这里（额度仍是
- *      链级 2 次）。草稿态的换法没有入口 —— 那时这一步还没轮到，
+ *   ② 「换个做法」。单步的修理发生在这步真的摆到面前之后：offered 的在这里，
+ *      claimed / active 的在「进行中」那张卡上（Phase 7），共享同一只输入匣。
+ *      额度仍是链级 2 次。草稿态的换法没有入口 —— 那时这一步还没轮到，
  *      "做不做得了"只是个假设（见 LineReviewCard 的说明）。
  *
  * 不再有"前置没完成"的灰卡：前置没完成的步骤在板上**不会出现**。
@@ -881,9 +1127,7 @@ function LineReviewCard({ chain }: { chain: QuestChain }) {
 function OfferCard({ quest }: { quest: Quest }) {
   const save = useSave();
   const mutate = useMutate();
-  const { busy, error, run, clearError } = useAgentAction();
   const [open, setOpen] = useState(false);
-  const [request, setRequest] = useState('');
 
   const membership = quest.chain;
   const chain = membership ? save.quests.chains[membership.chainId] : undefined;
@@ -893,18 +1137,6 @@ function OfferCard({ quest }: { quest: Quest }) {
 
   // 下一步（末一步时为 null）—— 只用来把"揭开"这件事说清楚
   const successor = membership ? successorOf(save, membership.chainId, membership.index) : null;
-
-  const reroute = () => {
-    void run(async () => {
-      // 空诉求在 `rerouteQuestDraft` 与 thunk 的同一条归一化里收口，这里不替一次
-      const result = await thunks.reroute({ questId: quest.id, request });
-      if (result.ok) {
-        setRequest('');
-        setOpen(false);
-      }
-      return result;
-    });
-  };
 
   return (
     <CardShell
@@ -958,43 +1190,9 @@ function OfferCard({ quest }: { quest: Quest }) {
         </p>
       )}
 
-      {/* 微型输入框：一行的位置，问一个问题 */}
+      {/* 共享输入匣：与「进行中」的卡片同一只（先选原因，再决定补不补一句） */}
       {open && reroutable && (
-        <div className="mt-3 animate-fade-up rounded-xl border border-abyss-500/30 bg-abyss-500/[0.07] p-2.5">
-          <div className="flex items-baseline gap-2">
-            <span className="text-[10.5px] tracking-wider text-abyss-300/85">换个做法</span>
-            <span className="numeric ml-auto text-[10px] text-white/30">
-              {request.length} / {REROUTE_REQUEST_MAX_LEN}　本条链还剩 {remaining} 次
-            </span>
-          </div>
-          <p className="mt-1 text-[10.5px] leading-relaxed text-white/40">
-            目的地不变，只换这一步怎么走。留空的话，它会假定"这一步排得太满了"。
-          </p>
-          <div className="mt-2 flex gap-1.5">
-            <input
-              type="text"
-              value={request}
-              maxLength={REROUTE_REQUEST_MAX_LEN}
-              autoFocus
-              onChange={(e) => setRequest(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') reroute();
-                if (e.key === 'Escape') setOpen(false);
-              }}
-              placeholder="例：先只做最小的一版，别一次铺开"
-              className="min-w-0 flex-1 rounded-lg border border-white/[0.12] bg-ink-950/55 px-2.5 py-1.5 text-[11.5px] text-white placeholder:text-white/25 focus:border-abyss-400/50 focus:outline-none focus:ring-1 focus:ring-abyss-400/30"
-            />
-            <button
-              type="button"
-              disabled={busy}
-              onClick={reroute}
-              className="shrink-0 rounded-lg border border-abyss-400/50 bg-abyss-500/20 px-3 py-1.5 text-[11.5px] text-abyss-300 transition-all duration-300 ease-cinematic hover:bg-abyss-500/[0.32] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {busy ? '…' : '换'}
-            </button>
-          </div>
-          {error && <InlineError message={error} onDismiss={clearError} />}
-        </div>
+        <RerouteBox quest={quest} remaining={remaining} onClose={() => setOpen(false)} />
       )}
     </CardShell>
   );
@@ -1004,6 +1202,12 @@ function OfferCard({ quest }: { quest: Quest }) {
  * 「进行中」三种状态共用的卡片。右侧按钮由状态决定：
  * 待结算 → 去结算；执行中 → 点击完成（先进 turn_in_pending，再开结算面板）；
  * 待开始 → 开始执行。
+ *
+ * Phase 7 起卡上还长着「换个做法」：领了、甚至做了一半才发现这一版不对，
+ * 是真实会发生的事（事故③的尾巴）。替换件**继承手里的进度** —— 状态还是
+ * claimed / active，claimedAt 与 startedAt 原样接回（见 operations 的
+ * REROUTABLE_STATUSES 与继承注释）。待结算（turn_in_pending）的那一步
+ * 不渲染它：先把这次结算结掉，才有"做法"可谈。
  */
 function QuestCard({
   quest,
@@ -1012,19 +1216,92 @@ function QuestCard({
   quest: Quest;
   action: { label: string; onClick: () => void };
 }) {
+  const save = useSave();
+  const mutate = useMutate();
+  const [open, setOpen] = useState(false);
+  const [closeAsk, setCloseAsk] = useState(false);
+
+  const membership = quest.chain;
+  const chain = membership ? save.quests.chains[membership.chainId] : undefined;
+  const remaining = REROUTE_CHAIN_LIMIT - (chain?.review.rerouteCount ?? 0);
+  const reroutable = quest.status !== 'turn_in_pending' && Boolean(membership) && remaining > 0;
+
+  // 收束入口只长在**这条链此刻正在走的那一步**上（在手成员里 index 最小的那张卡）：
+  // "这条线要不要停"是整条线的决定，每张卡都挂一遍只会把它变成噪音。
+  // head 恰好落在「进行中」的某一张卡上 —— 待结算的那一步不接（先结掉，
+  // 与 closeQuestChain 的守卫同一句话）。
+  const standing = membership
+    ? Object.values(save.quests.byId).filter(
+        (q) => q.chain?.chainId === membership.chainId && REROUTABLE_STATUSES.includes(q.status),
+      )
+    : [];
+  const headIndex = standing.reduce<number | null>((min, q) => {
+    const idx = q.chain?.index ?? null;
+    if (idx === null) return min;
+    return min === null || idx < min ? idx : min;
+  }, null);
+  const showClose =
+    Boolean(membership) &&
+    quest.status !== 'turn_in_pending' &&
+    membership?.index === headIndex &&
+    canCloseQuestChain(save, membership.chainId).ok;
+
   return (
-    <CardShell
-      quest={quest}
-      footer={
-        <button
-          type="button"
-          onClick={action.onClick}
-          className="rounded-lg border border-amber-400/45 bg-amber-400/[0.12] px-2.5 py-1.5 text-[11.5px] text-amber-200 transition-all duration-300 ease-cinematic hover:scale-[1.04] hover:bg-amber-400/[0.22] hover:shadow-glow-gold active:scale-[0.98]"
-        >
-          {action.label}
-        </button>
-      }
-    />
+    <>
+      <CardShell
+        quest={quest}
+        footer={
+          <div className="flex flex-wrap items-center gap-1.5">
+            {showClose && (
+              <button
+                type="button"
+                onClick={() => setCloseAsk(true)}
+                className="mr-auto px-0.5 text-[11px] text-white/40 transition hover:text-white/70"
+              >
+                收束这条线
+              </button>
+            )}
+            {reroutable && (
+              <button
+                type="button"
+                aria-expanded={open}
+                onClick={() => setOpen((v) => !v)}
+                className={cn(
+                  'glass-pill glass-hover px-2.5 py-1.5 text-[11.5px]',
+                  open ? 'text-abyss-300' : 'text-white/65',
+                )}
+              >
+                换个做法
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={action.onClick}
+              className="rounded-lg border border-amber-400/45 bg-amber-400/[0.12] px-2.5 py-1.5 text-[11.5px] text-amber-200 transition-all duration-300 ease-cinematic hover:scale-[1.04] hover:bg-amber-400/[0.22] hover:shadow-glow-gold active:scale-[0.98]"
+            >
+              {action.label}
+            </button>
+          </div>
+        }
+      >
+        {open && reroutable && (
+          <RerouteBox quest={quest} remaining={remaining} onClose={() => setOpen(false)} />
+        )}
+      </CardShell>
+
+      <ConfirmDialog
+        open={closeAsk}
+        question="这条线就走到这里？"
+        subject={chain?.title ?? quest.title}
+        detail="收束不是失败 —— 停止也是完成。还没走完的步骤会转成「搁下」归档，走过的部分一步都不会白走。想回顾时，它躺在「已收束」里，点开就是收官。"
+        confirmLabel="收束"
+        onConfirm={() => {
+          setCloseAsk(false);
+          if (membership) mutate((s) => closeQuestChain(s, membership.chainId, new Date()));
+        }}
+        onCancel={() => setCloseAsk(false)}
+      />
+    </>
   );
 }
 
@@ -1032,9 +1309,424 @@ function QuestCard({
 // Tab · 灵感（Spark Box）
 // ---------------------------------------------------------------------------
 
+/**
+ * 三档容量（满档 / 轻档 / 回档）。口径与 `00-shared-context.md` 的
+ * 「容量三档」一节同源：这里写的每句话，提示词那边都已经对 Agent 说过一遍。
+ *
+ * 选择**只影响这一次生成**，不落存档 —— 它是"这次的力气"，不是身份。
+ * 默认满档：不选就是照常，老玩家的手感不因这个功能改变。
+ */
+const CAPACITY_CHOICES: ReadonlyArray<{ key: ForgeCapacity; label: string; hint: string }> = [
+  { key: 'full', label: '满档', hint: '照常给：每步 15 分钟 ~ 2 小时，一条链正常展开。' },
+  { key: 'light', label: '轻档', hint: '这阵子力气小：每步 15 ~ 30 分钟，当天轻松能完。' },
+  {
+    key: 'relapse',
+    label: '回档',
+    hint: '停了很久：先给一条三到五步的最小恢复链，第一步不需要任何前置。',
+  },
+];
+
 function SparkTab({ onForged }: { onForged: () => void }) {
+  const save = useSave();
+  // ⚠️ 这一句的初始值字面量被冒烟脚本的转译插件改写（panel-smoke:
+  //    smoke:bounty-initial-tab 那条）—— 改这行时同步它，否则定标入口
+  //    在 SSR 里渲染不到。
+  const [mode, setMode] = useState<SparkMode>('forge');
+  /** 刚判完的那一次定标：基线卡要留在屏幕上，直到玩家点「收下」 */
+  const [baselineId, setBaselineId] = useState<string | null>(null);
+
+  // 有卷子在走 → 作答屏优先接管。卷子活在存档里（diagnostics.active），
+  // 离开这一栏再回来必须能接着答 —— "答到一半刷新不丢卷"就是靠这一条成立的。
+  const active = save.diagnostics.active;
+  if (active !== null) {
+    return (
+      <div className="pt-3.5">
+        <DiagnosisAnswers record={active} onSettled={setBaselineId} />
+      </div>
+    );
+  }
+
+  const settled =
+    baselineId === null ? undefined : save.diagnostics.history.find((r) => r.id === baselineId);
+
+  // 基线卡只在"刚判完"的这一趟旅程里留在屏幕上（记录本身已归入档案）——
+  // 刷新之后回到入口：链已经在「待议」里等着，基线不是一条会被错过的路。
+  if (settled?.baseline) {
+    return (
+      <div className="pt-3.5">
+        <DiagnosisBaselineCard
+          record={settled}
+          onGoToReview={onForged}
+          onDone={() => setBaselineId(null)}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="pt-3.5">
+      {/* 双入口（PO 裁定：自由选）。默认仍是「直接开链」——那是这块面板
+          原本的手感；定标在旁边一步可达，而不是把每个人先拦下来答一张卷子。 */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Chip active={mode === 'forge'} onClick={() => setMode('forge')}>
+          直接开链
+        </Chip>
+        <Chip active={mode === 'diagnosis'} onClick={() => setMode('diagnosis')}>
+          开局定标
+        </Chip>
+      </div>
+      {mode === 'forge' ? <ForgeIntake onForged={onForged} /> : <DiagnosisIntake />}
+    </div>
+  );
+}
+
+/**
+ * 灵感栏的两个入口。
+ *
+ *   'forge'     —— 写下想法直接铸链（Phase 2 就有的一屏，默认入口）；
+ *   'diagnosis' —— 开局定标：先量起点，再排第一条链（Phase 7 · up 迁移）。
+ *
+ * 顺序上「直接开链」在前：它是这块面板原本的手感，定标不抢它的位置 ——
+ * 两个入口自由选是 PO 的裁定，不是给每个人安排的必经之路。
+ */
+type SparkMode = 'forge' | 'diagnosis';
+
+/**
+ * 定标第一屏：写下目标。
+ *
+ * 只收一句话 —— 定标师要的是**原话**（改写是它的活，诚实是玩家的活）。
+ * 出题这一步失败时目标留在框里：那段话是玩家自己写的，重试不该要第二遍。
+ * 成功之后不用在这里切屏：卷子落进存档，外层按存档状态渲染，作答屏自己接管。
+ */
+function DiagnosisIntake() {
+  const [goal, setGoal] = useState('');
+  const { busy, error, run, clearError } = useAgentAction();
+  const ready = goal.trim().length > 0 && !busy;
+
+  const start = () => {
+    if (!ready) return;
+    void run(() => thunks.designDiagnosis({ goalRaw: goal.trim() }));
+  };
+
+  return (
+    <div className="mt-3.5">
+      <p className="prose-cinematic text-[12.5px] leading-relaxed text-white/55">
+        先量起点，再谈走多远。写下你想去哪 —— 一句话就够，改写是定标师的活。
+      </p>
+
+      <textarea
+        value={goal}
+        onChange={(e) => setGoal(e.target.value)}
+        rows={3}
+        maxLength={200}
+        placeholder="例如：我想把英语捡起来，以后能看懂英文资料、跟人开会不慌。"
+        aria-label="定标目标"
+        className="mt-3 w-full resize-none rounded-xl border border-white/[0.12] bg-ink-950/45 px-3.5 py-3 text-[12.5px] leading-relaxed text-white placeholder:text-white/30 focus:border-amber-400/40 focus:outline-none focus:ring-1 focus:ring-amber-400/30"
+      />
+
+      <p className="mt-2 text-[10.5px] leading-relaxed text-white/35">
+        接下来是一张几分钟能答完的卷子：三四道题，开放与选择混合。它不判对错，只量位置；
+        答完之前，你随时可以放弃。
+      </p>
+
+      <button
+        type="button"
+        disabled={!ready}
+        onClick={start}
+        className={cn(
+          'mt-4 w-full rounded-lg border py-2.5 text-[12.5px] transition-all duration-300 ease-cinematic',
+          ready
+            ? 'border-amber-400/50 bg-amber-400/15 font-medium text-amber-200 shadow-glow-gold hover:scale-[1.02] hover:bg-amber-400/25 active:scale-[0.99]'
+            : 'cursor-not-allowed border-white/10 bg-white/[0.04] text-white/30',
+        )}
+      >
+        {busy ? '定标师正在出题…' : '让定标师出题'}
+      </button>
+
+      {error && <InlineError message={error} onDismiss={clearError} />}
+    </div>
+  );
+}
+
+/**
+ * 定标第二屏：作答。
+ *
+ * 读的是**存档里的卷子**（diagnostics.active），不是组件 state ——
+ * 答到一半离开或刷新，回来还是这张卷（先例：结算面板的 turn_in_pending）。
+ *
+ * 交卷是两步、有先后：先 `submitDiagnosisAnswers` 把答案落盘，再叫判分。
+ * 顺序反过来的话，判分那段等待里刷新页面，答案就没了 —— 而那段等待
+ * （思考 + 铸链）偏偏是这条流程里最长的一次。
+ */
+function DiagnosisAnswers({
+  record,
+  onSettled,
+}: {
+  record: DiagnosticRecord;
+  onSettled: (recordId: string) => void;
+}) {
+  const mutate = useMutate();
+  const { busy, error, run, clearError } = useAgentAction();
+  const [confirming, setConfirming] = useState(false);
+  /** 逐题的草稿答案。初值取记录里已有的 —— 判分失败重试时不必重写 */
+  const [draft, setDraft] = useState<Record<string, string>>(() =>
+    Object.fromEntries(record.answers.map((a) => [a.questionId, a.text])),
+  );
+
+  const answered = record.questions.filter((q) => (draft[q.id] ?? '').trim().length > 0).length;
+  const ready = answered > 0 && !busy;
+
+  const submit = () => {
+    if (!ready) return;
+    void run(async () => {
+      mutate((s) =>
+        submitDiagnosisAnswers(
+          s,
+          record.questions.map((q) => ({ questionId: q.id, text: draft[q.id] ?? '' })),
+          new Date(),
+        ),
+      );
+      const result = await thunks.runDiagnosis();
+      // 判分成功后记录归档、链进「待议」；基线卡由外层按 id 接管
+      if (result.ok) onSettled(result.data.recordId);
+      return result;
+    });
+  };
+
+  const giveUp = () => {
+    mutate((s) => cancelDiagnosis(s, new Date()));
+    setConfirming(false);
+  };
+
+  return (
+    <div>
+      <div className="flex items-center gap-2">
+        <span className="h-1.5 w-1.5 animate-dot-pulse rounded-full bg-abyss-400" />
+        <span className="text-[10.5px] tracking-[0.18em] text-white/45">开局定标 · 作答</span>
+      </div>
+      <p className="mt-1.5 text-[11.5px] leading-relaxed text-white/55">
+        定标师把目标定成：{record.goalReframed}
+      </p>
+
+      <div className="mt-3 space-y-2.5">
+        {record.questions.map((q, i) => (
+          <div key={q.id} className="rounded-xl border border-white/[0.09] bg-white/[0.035] p-3">
+            <div className="flex items-baseline gap-2">
+              <span className="numeric shrink-0 text-[10.5px] text-white/30">{i + 1}</span>
+              <span className="min-w-0 flex-1 text-[12px] leading-relaxed text-white/85">
+                {q.prompt}
+              </span>
+            </div>
+            {q.kind === 'open' ? (
+              <textarea
+                value={draft[q.id] ?? ''}
+                onChange={(e) => setDraft((d) => ({ ...d, [q.id]: e.target.value }))}
+                rows={3}
+                maxLength={1200}
+                aria-label={`第 ${i + 1} 题`}
+                placeholder="写下真实情况就好 —— 这道题量的是位置，不是表现。"
+                className="mt-2 w-full resize-none rounded-lg border border-white/[0.1] bg-ink-950/45 px-3 py-2.5 text-[12px] leading-relaxed text-white placeholder:text-white/25 focus:border-abyss-400/40 focus:outline-none focus:ring-1 focus:ring-abyss-400/30"
+              />
+            ) : (
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {q.options.map((opt) => (
+                  <Chip
+                    key={opt}
+                    active={(draft[q.id] ?? '') === opt}
+                    onClick={() => setDraft((d) => ({ ...d, [q.id]: opt }))}
+                  >
+                    {opt}
+                  </Chip>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-3 flex items-center justify-between text-[10.5px] text-white/35">
+        <span>
+          已答 <span className="numeric">{answered}</span>/{record.questions.length} 题
+        </span>
+        <span>卷面先落存档 · 判分没接上也不丢</span>
+      </div>
+
+      {error && <InlineError message={error} onDismiss={clearError} />}
+
+      <div className="mt-3 flex gap-2">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => setConfirming(true)}
+          className="glass-pill glass-hover flex-1 py-2.5 text-[12.5px] text-white/60 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          放弃定标
+        </button>
+        <button
+          type="button"
+          disabled={!ready}
+          onClick={submit}
+          className={cn(
+            'flex-[1.4] rounded-lg border py-2.5 text-[12.5px] transition-all duration-300 ease-cinematic',
+            ready
+              ? 'border-amber-400/50 bg-amber-400/15 font-medium text-amber-200 shadow-glow-gold hover:scale-[1.02] hover:bg-amber-400/25 active:scale-[0.99]'
+              : 'cursor-not-allowed border-white/10 bg-white/[0.04] text-white/30',
+          )}
+        >
+          {busy ? '定标师正在判分…' : '交卷 · 量出基线'}
+        </button>
+      </div>
+
+      <ConfirmDialog
+        open={confirming}
+        question="这次定标就不往下走了？"
+        detail={
+          <p className="text-[11.5px] leading-relaxed text-white/55">
+            放弃会把这张卷子归档 —— 它不再往下走，也不会铸链。想清楚了随时可以重新起一张。
+          </p>
+        }
+        confirmLabel="放弃"
+        cancelLabel="继续答"
+        onConfirm={giveUp}
+        onCancel={() => setConfirming(false)}
+      />
+    </div>
+  );
+}
+
+/**
+ * 定标第三屏：基线卡。
+ *
+ * 也是整个定标流程唯一一次"成绩单"式的展示 —— 但它没有总分、没有及格线：
+ * 一句话的位置标签 + 几个可比较的维度 + 已经有的 / 现在还缺的。
+ * 它回答的是"起点长什么样"，好让后面每一步都有资格说"这比起点高了"。
+ *
+ * 独立导出（而不是内嵌在流程里）有两个理由：① 冒烟脚本能拿一份真夹具直接
+ * 渲染它（portal 之外的纯展示组件才验得动）；② "刚判完"那一趟旅程之外，
+ * 将来若要有定标档案浏览器，也是复用它。
+ */
+export function DiagnosisBaselineCard({
+  record,
+  onGoToReview,
+  onDone,
+}: {
+  record: DiagnosticRecord;
+  onGoToReview: () => void;
+  onDone: () => void;
+}) {
+  const save = useSave();
+  const baseline = record.baseline;
+  if (baseline === null) return null;
+  const chain = record.chainId === null ? undefined : save.quests.chains[record.chainId];
+
+  return (
+    <div className="rounded-xl border border-amber-400/25 bg-amber-400/[0.06] p-3.5">
+      <div className="flex items-center gap-2">
+        <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+        <span className="text-[10.5px] tracking-[0.18em] text-amber-400/90">基线 · 已记录</span>
+      </div>
+
+      <p className="mt-2 text-[10.5px] leading-relaxed text-white/40">
+        你写下的是：「{record.goalRaw}」
+      </p>
+      <p className="mt-1 text-[12.5px] leading-relaxed text-white/80">
+        定标师把它改成：{record.goalReframed}
+      </p>
+
+      <div className="mt-3 rounded-lg border border-white/10 bg-ink-950/40 p-3">
+        <p className="prose-cinematic text-[13px] font-medium tracking-wide text-white/90">
+          {baseline.levelLabel}
+        </p>
+        <p className="mt-1 text-[11.5px] leading-relaxed text-white/55">{baseline.summary}</p>
+
+        <div className="mt-2.5 space-y-1.5">
+          {baseline.dimensions.map((d) => (
+            <div key={d.key} className="flex items-center gap-2">
+              <span className="w-16 shrink-0 truncate text-[10.5px] text-white/45">{d.label}</span>
+              <span className="h-1 flex-1 overflow-hidden rounded-full bg-white/[0.08]">
+                <span
+                  className="block h-full rounded-full bg-abyss-400/70"
+                  style={{ width: `${d.score}%` }}
+                />
+              </span>
+              <span className="numeric w-7 shrink-0 text-right text-[10.5px] text-white/45">
+                {d.score}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {baseline.strengths.length > 0 && (
+        <div className="mt-2.5">
+          <div className="text-[10.5px] tracking-wider text-white/40">已经有的</div>
+          <ul className="mt-1 space-y-1">
+            {baseline.strengths.map((s) => (
+              <li key={s} className="flex gap-1.5 text-[11.5px] leading-relaxed text-white/70">
+                <span className="shrink-0 text-amber-400/70">·</span>
+                <span className="min-w-0">{s}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {baseline.gaps.length > 0 && (
+        <div className="mt-2.5">
+          <div className="text-[10.5px] tracking-wider text-white/40">现在还缺的</div>
+          <ul className="mt-1 space-y-1">
+            {baseline.gaps.map((g) => (
+              <li key={g} className="flex gap-1.5 text-[11.5px] leading-relaxed text-white/70">
+                <span className="shrink-0 text-abyss-400/70">·</span>
+                <span className="min-w-0">{g}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {record.suggestedClassIds.length > 0 && (
+        <p className="mt-2.5 text-[10.5px] leading-relaxed text-white/40">
+          定标师倾向：
+          {record.suggestedClassIds.map((id) => classLabelOf(id as ClassIdLiteral)).join('、')}
+          {' '}—— 只是建议，归哪条线由调度员和你一起在「待议」里定。
+        </p>
+      )}
+
+      {chain && (
+        <p className="mt-2 text-[11px] leading-relaxed text-white/55">
+          已按这个起点排出「{chain.title}」——{' '}
+          <span className="numeric">{chain.questIds.length}</span> 步，正在「待议」里等你过目。
+        </p>
+      )}
+
+      <div className="mt-3 flex gap-2">
+        <button
+          type="button"
+          onClick={onDone}
+          className="glass-pill glass-hover flex-1 py-2.5 text-[12.5px] text-white/70"
+        >
+          收下
+        </button>
+        <button
+          type="button"
+          onClick={onGoToReview}
+          className="flex-[1.4] rounded-lg border border-amber-400/50 bg-amber-400/15 py-2.5 text-[12.5px] font-medium text-amber-200 shadow-glow-gold transition-all duration-300 ease-cinematic hover:scale-[1.02] hover:bg-amber-400/25 active:scale-[0.99]"
+        >
+          去看待议
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 直接开链那一屏（Phase 2 原有的灵感栏，Phase 7 之后成为「直接开链」入口的正文）。
+ */
+function ForgeIntake({ onForged }: { onForged: () => void }) {
   const [idea, setIdea] = useState('');
   const [deep, setDeep] = useState(false);
+  const [capacity, setCapacity] = useState<ForgeCapacity>('full');
   const { busy, error, run, clearError } = useAgentAction();
 
   // 只是**预测**，不是承诺：真正决定归属的是调度员（见 thunks.forgeChain）。
@@ -1050,6 +1742,7 @@ function SparkTab({ onForged }: { onForged: () => void }) {
         idea: idea.trim(),
         deepDeliberation: deep,
         classId: null,
+        capacity,
       });
       // 只有真的拿到链才清空输入框：失败时那段话必须还在，
       // 否则玩家得凭记忆把它再写一遍（那正是他想省掉的力气）。
@@ -1061,11 +1754,29 @@ function SparkTab({ onForged }: { onForged: () => void }) {
     });
   };
 
+  // 外层 SparkTab 已有 pt-3.5；这里只留与「开局定标」同一档的 mt-3.5
+  // （间距归外层管，入口屏自己只负责与那排 chips 的距离）。
   return (
-    <div className="pt-3.5">
+    <div className="mt-3.5">
       <p className="prose-cinematic text-[12.5px] leading-relaxed text-white/55">
         写一件你最近反复想起、但一直没动手的事。它会被拆成几步，摆在板上等你过目。
       </p>
+
+      {/* 三档容量：告诉 Agent"这次给多厚"。选完照常写想法、照常生成 ——
+          区别只在出来的链是长的、短的、还是只有几步用来重新起步的。 */}
+      <div className="mt-3">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[10.5px] text-white/35">这次的档位</span>
+          {CAPACITY_CHOICES.map((c) => (
+            <Chip key={c.key} active={capacity === c.key} onClick={() => setCapacity(c.key)}>
+              {c.label}
+            </Chip>
+          ))}
+        </div>
+        <p className="mt-1.5 text-[10.5px] leading-relaxed text-white/35">
+          {CAPACITY_CHOICES.find((c) => c.key === capacity)?.hint}
+        </p>
+      </div>
 
       <textarea
         value={idea}

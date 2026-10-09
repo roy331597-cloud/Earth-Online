@@ -1,6 +1,6 @@
 // ============================================================================
 // EarthOnline · 职业头衔目录（静态设定，不入存档）
-// 初始 4 条职业线。新的职业线由 Dispatcher + Blueprint Generator 动态铸造。
+// 初始 5 条职业线。新的职业线由 Dispatcher + Blueprint Generator 动态铸造。
 // ============================================================================
 
 import type { AttributeKey, ClassIdLiteral } from '../../types/core';
@@ -50,6 +50,7 @@ export interface ClassCatalogEntry {
  *   investor   前期快 —— 让玩家尽早体会"系统化"的正反馈
  *   influencer 最快   —— 内容有即时反馈是事实，不该假装不是
  *   founder    最慢   —— 创业的斜率本来就很陡
+ *   english    中速均匀 —— 语言的复利按天计，坡度均匀比冲刺重要
  */
 export const CLASSES: ClassCatalogEntry[] = [
   // ==========================================================================
@@ -927,6 +928,251 @@ export const CLASSES: ClassCatalogEntry[] = [
         dueHintDays: 5,
         proof: { criterion: '分类表（含占比）与一句自评', kind: 'text' },
         tags: ['cash_flow', 'self_audit'],
+      },
+    ],
+  },
+  // ==========================================================================
+  // 5. 英语（Phase 7 · up 迁移新增）
+  //
+  // 内容观点取材自《人生进阶指南》(github byoungd/up)，CC BY-NC 4.0，
+  // 个人非商用工具内引用：词汇八问、六类意义选择、六层错误地图、五遍阅读、
+  // 四遍作品链、无稿基线 + 听众复述、真题闭环 —— 均为该书的练习法，
+  // 此处改写为「当天坐下就能做完」的动作与产物。
+  //
+  // 定位：**通往雅思 7.0 的长期线**。「每天完成一步」是写在链文案里的承诺，
+  // 不是系统级的日更机制 —— 日常只能由玩家自己创建（见 quest.ts 的日常红线），
+  // 本线不设、也不许 AI 设任何强制打卡。种子的颗粒度因此统一按
+  // 15 分钟 ~ 2 小时设计：一趟坐下，一步走完。
+  // ==========================================================================
+  {
+    classId: 'english_learner',
+    displayName: 'English Learner',
+    displayNameCN: '英语',
+    creed: '把一门语言，走成一条每天的路。',
+    domains: [
+      'IELTS preparation', 'vocabulary in context', 'listening error mapping',
+      'five-pass reading', 'writing revision cycles', 'speaking without a script',
+      'spaced retrieval', 'real-world usage',
+    ],
+    agentDisplayName: '语匠',
+    agentTagline: '语言不会因为你打算学而长进，它只对每天真的用一次的人生根。',
+    expCurve: { base: 110, exponent: 1.3, maxLevel: 99 },
+    titleTiers: [
+      { fromLevel: 1, title: '拾语者', requirementHint: '开始捡起第一块词块' },
+      { fromLevel: 8, title: '开口者', requirementHint: '不写稿也能说满一分钟' },
+      { fromLevel: 16, title: '复述者', requirementHint: '听完一段材料，能用自己的话讲回来' },
+      { fromLevel: 25, title: '对谈者', requirementHint: '能和真人聊完一段来回，不靠翻译' },
+      { fromLevel: 36, title: '讲清者', requirementHint: '能用英文把一件复杂的事讲清楚' },
+      { fromLevel: 50, title: '传译者', requirementHint: '两种语言之间的意思，你搬得动' },
+      { fromLevel: 70, title: '双语者', requirementHint: '它不再是你需要「学」的东西' },
+    ],
+    linkedGoalIds: ['GLOBAL_MOBILITY'],
+    attributeWeights: { foc: 0.3, int: 0.25, cha: 0.25, cap: 0.2 },
+    recommendedDailies: [
+      { title: '听一段真实材料，不必全听懂', targetPerDay: 1, iconKey: 'ear', rationale: '听力长在暴露量上，不长在听懂率上' },
+      { title: '无稿说满 90 秒', targetPerDay: 1, iconKey: 'voice', rationale: '口语只能被说出来，不能被读出来' },
+      { title: '背一块词块，再造一个自己的句子', targetPerDay: 1, iconKey: 'word', rationale: '孤立的单词会被忘掉，用过一次的不会' },
+    ],
+    seedQuests: [
+      {
+        tempId: 'en_seed_1',
+        title: '摸底定标',
+        subtitle: '先量起点，再谈走多远',
+        narrative:
+          '目标喊得再响，也不如一张诚实的现状单有用。在决定「每天走一步」之前，先花一个下午把起点量清楚 —— 这之后每一步的难度才可能是对的。',
+        objective:
+          '完成一次完整的英语摸底，产出一页「起点档案」：① 写下你的目标原话 —— 考到什么分数、想用英语做什么；② 在不查词典、不加时长的前提下完成四项自测：凭记忆列出一批你能读懂的词并标注把握程度、录一段 90 秒无稿口述、听一段两分钟真实音频后复述要点、限时写一篇 150 词短文；③ 把四项结果与目标并排放好，写出你的基线描述（现在在哪里）与三条最挡路的短板（差在哪里）。',
+        type: 'side',
+        difficulty: 3,
+        effortEstimate: { unit: 'hour', value: 2 },
+        reward: { exp: 300, attributePoints: { int: 1 } },
+        outcomeHints: ['一页起点档案：目标 + 基线 + 三条短板', '此后每一步难度的判断依据'],
+        linkedGoalIds: ['GLOBAL_MOBILITY'],
+        linkedAttributes: ['int', 'foc', 'cha'],
+        prerequisiteTempIds: [],
+        dueHintDays: 7,
+        proof: { criterion: '起点档案：目标原话、四项自测记录、基线描述与三条短板', kind: 'text' },
+        tags: ['diagnostic', 'baseline'],
+      },
+      {
+        tempId: 'en_seed_2',
+        title: '词汇：一个词的八个问题',
+        subtitle: '「面熟」与「会用」之间，隔着八个问题',
+        narrative:
+          '背单词容易白背，是因为「见过」被当成了「会」。一个词要能被用出来，得先被问到底：把它按八个问题翻一遍，才算真的拿下。',
+        objective:
+          '挑 5 个你「面熟但用不出来」的词，每个词依次回答八个问题：① 怎么读（看音标并出声念）；② 是什么词性；③ 核心义是什么（一句话，不是词典全文）；④ 常和什么词搭配；⑤ 造一个与你生活有关的句子；⑥ 近义词是谁、差别在哪；⑦ 常用在什么场合（口语／书面／正式）；⑧ 合上一切资料，凭记忆写下它的释义和一个例句。五个词做成 5 张词卡。',
+        type: 'side',
+        difficulty: 2,
+        effortEstimate: { unit: 'hour', value: 1 },
+        reward: { exp: 150 },
+        outcomeHints: ['5 张被翻过底的词卡', '一次「面熟 ≠ 会用」的校准'],
+        linkedGoalIds: ['GLOBAL_MOBILITY'],
+        linkedAttributes: ['int', 'foc'],
+        prerequisiteTempIds: [],
+        dueHintDays: 5,
+        proof: { criterion: '5 张含八问完整答案的词卡', kind: 'text' },
+        tags: ['vocabulary', 'depth'],
+      },
+      {
+        tempId: 'en_seed_3',
+        title: '语法：六类意义选择',
+        subtitle: '语法不是规矩，是意义的选项',
+        narrative:
+          '时态、冠词、被动 —— 它们不是用来背的规矩，而是表达不同意义时可选的工具。从你自己的错句出发，才能看见它们真正在替你做什么。',
+        objective:
+          '从你过去的英文写作或口语里挑出 6 个你常犯的语法点（可从这六类里找：时态、冠词、单复数、主动被动、连接、介词搭配）。每一处写四行：原句 → 它想表达什么意义 → 改后的正确句 → 改前改后的意义差在哪。最后写一句话：这六处里，哪一类错误最「伤意义」。',
+        type: 'side',
+        difficulty: 2,
+        effortEstimate: { unit: 'min', value: 90 },
+        reward: { exp: 180 },
+        outcomeHints: ['六组「原句 → 改写 → 意义差」对照', '一张属于你自己的语法错题地图'],
+        linkedGoalIds: ['GLOBAL_MOBILITY'],
+        linkedAttributes: ['int', 'foc'],
+        prerequisiteTempIds: [],
+        dueHintDays: 5,
+        proof: { criterion: '六组对照记录与一句总结', kind: 'text' },
+        tags: ['grammar', 'error_map'],
+      },
+      {
+        tempId: 'en_seed_4',
+        title: '听力：建一张六层错误地图',
+        subtitle: '听不清，先分清是哪一层听不清',
+        narrative:
+          '「听不懂」是一个被糊住的词，它下面至少压着六层原因：连读、弱读、生词、语速、口音、注意力。把它们拆开，练习才有靶子。',
+        objective:
+          '挑一段 3~5 分钟、语速真实的英语音频（播客、新闻、剧集皆可）。先不看文本盲听两遍：第一遍写下大意，第二遍补充细节。然后对照文本逐句核对，把每一处没听出来的地方按六层归类：连读、弱读、生词、语速、口音／语调、注意力断线。统计每层出现几次，找出最主要的那一层。',
+        type: 'side',
+        difficulty: 3,
+        effortEstimate: { unit: 'hour', value: 2 },
+        reward: { exp: 260, attributePoints: { int: 1 } },
+        outcomeHints: ['一张六层错误地图（含各层计数）', '一个明确的「主失分层」—— 它就是下一步的练习目标'],
+        linkedGoalIds: ['GLOBAL_MOBILITY'],
+        linkedAttributes: ['int', 'foc'],
+        prerequisiteTempIds: [],
+        dueHintDays: 5,
+        proof: { criterion: '六层分类统计与主失分层判定', kind: 'text' },
+        tags: ['listening', 'error_map'],
+      },
+      {
+        tempId: 'en_seed_5',
+        title: '阅读：五遍读完一篇',
+        subtitle: '一篇文章读五遍，每遍只带一个问题',
+        narrative:
+          '读不懂往往不是读得少，是每一遍都在做同一件事。把阅读拆成五遍、每遍只盯一个维度，理解的缝隙会自己显出来。',
+        objective:
+          '选一篇 400~800 词的英文材料（外刊、教材或任何你感兴趣的真实文本），按五遍读法走完：① 通读一遍只抓大意，不查任何词；② 第二遍圈出生词，但只判断「它拦没拦住理解」，只查拦路的那几个；③ 把这些词的释义贴回原句，重读那几段；④ 每一段用一句英文概括；⑤ 合上材料，用自己的话复述全文要点。记录每一遍的用时与理解度的变化。',
+        type: 'side',
+        difficulty: 2,
+        effortEstimate: { unit: 'hour', value: 1 },
+        reward: { exp: 170 },
+        outcomeHints: ['一份五遍阅读的用时记录', '一句「哪一遍贡献最大」的体感结论'],
+        linkedGoalIds: ['GLOBAL_MOBILITY'],
+        linkedAttributes: ['int', 'foc'],
+        prerequisiteTempIds: [],
+        dueHintDays: 5,
+        proof: { criterion: '五遍各自的产出与一段对照记录', kind: 'text' },
+        tags: ['reading', 'method'],
+      },
+      {
+        tempId: 'en_seed_6',
+        title: '写作：一篇作文走四遍',
+        subtitle: '好文章不是写出来的，是改出来的',
+        narrative:
+          '只写一遍的作文，是草稿加上运气。真正让写作能力增长的，是修改的四遍循环 —— 每一遍只问一类问题。',
+        objective:
+          '写一篇 250 词左右的英文短文（雅思大作文题或任何你想写的真实主题），完整走四遍：① 限时起草，不回头改；② 对照清单自改一遍，四类各问一遍 —— 结构是否清楚、论据是否具体、连接是否自然、语法是否干净；③ 交给一个真人或 AI 陪练读，只收集「哪里没读懂」，不收夸赞；④ 定稿，并写下这四遍里最值钱的一处修改及其理由。四个版本全部留档。',
+        type: 'side',
+        difficulty: 4,
+        effortEstimate: { unit: 'hour', value: 2 },
+        reward: { exp: 480, attributePoints: { int: 1, foc: 1 } },
+        outcomeHints: ['一篇作文的四个版本', '一处「最值钱的修改」及其理由'],
+        linkedGoalIds: ['GLOBAL_MOBILITY'],
+        linkedAttributes: ['int', 'foc', 'wil'],
+        prerequisiteTempIds: [],
+        dueHintDays: 7,
+        proof: { criterion: '四个版本与一段修改复盘', kind: 'text' },
+        tags: ['writing', 'revision_chain'],
+      },
+      {
+        tempId: 'en_seed_7',
+        title: '口语：无稿说九十秒',
+        subtitle: '先允许自己说得难看，再说得清楚',
+        narrative:
+          '口语的起点不是正确，是敢连续说满九十秒而不停。稿子会替你遮住真实水平 —— 所以先录下无稿的那一版。',
+        objective:
+          '挑一个你熟悉的话题，录一段 90 秒的即兴口述（不打稿，卡住也用英语硬撑）。回听并标记：卡壳几处、中式表达几处、明显的语法错几处。然后只写 5 个关键词（依然不写稿），就同一话题再录一遍。最后把第二遍放给一个人（真人或 AI 陪练）听，请他完整复述你说了什么，记录他复述的内容与你想说的差距。',
+        type: 'side',
+        difficulty: 3,
+        effortEstimate: { unit: 'hour', value: 1 },
+        reward: { exp: 260, attributePoints: { cha: 1 } },
+        outcomeHints: ['两版 90 秒录音与错误标记', '一份「听众转述」—— 你实际传达出去的意思'],
+        linkedGoalIds: ['GLOBAL_MOBILITY'],
+        linkedAttributes: ['cha', 'foc', 'wil'],
+        prerequisiteTempIds: [],
+        dueHintDays: 5,
+        proof: { criterion: '两版录音、错误标记与听众复述记录', kind: 'text' },
+        tags: ['speaking', 'baseline'],
+      },
+      {
+        tempId: 'en_seed_8',
+        title: '真题闭环',
+        subtitle: '分数不重要，错因的分布才重要',
+        narrative:
+          '做真题最大的浪费，是对完答案就翻篇。真正的信息不在对错里，在你为什么错里 —— 把错因统计出来、针对性重做一次，才算闭合。',
+        objective:
+          '严格计时完成一套雅思真题的完整板块（听力或阅读整节，二选一）。批改后把每一道错题归因到五类之一：词汇、语法、定位、时间、理解。统计各占几道，找出最大的那一类；针对它，从同题材里挑一组对应题型重做，对比前后正确率与用时。',
+        type: 'milestone',
+        difficulty: 5,
+        effortEstimate: { unit: 'hour', value: 2 },
+        reward: { exp: 900, attributePoints: { wil: 1, int: 1 } },
+        outcomeHints: ['一份错因分布统计', '一次「针对性重做」的前后对照'],
+        linkedGoalIds: ['GLOBAL_MOBILITY'],
+        linkedAttributes: ['int', 'wil', 'foc'],
+        prerequisiteTempIds: ['en_seed_1'],
+        dueHintDays: 10,
+        proof: { criterion: '错因统计表与重做对照记录', kind: 'text' },
+        tags: ['ielts', 'error_map', 'milestone'],
+      },
+      {
+        tempId: 'en_seed_9',
+        title: '英语时刻',
+        subtitle: '每天一步，先走今天这一步',
+        narrative:
+          '英语不会因为你打算学而长进，它只对每天真的碰一次的人生根 —— 而这一碰，三十分钟就够。',
+        objective:
+          '在半小时里走完一个最小的英语闭环：① 用十分钟凭记忆写下或说出三个最近见过的词块（记不全没关系，写下记得的部分）；② 用十分钟把这几块各造一个与你生活有关的句子，并出声念一遍；③ 用十分钟写下今天卡在哪里、明天从哪一句继续。',
+        type: 'special',
+        difficulty: 1,
+        effortEstimate: { unit: 'min', value: 30 },
+        reward: { exp: 80 },
+        outcomeHints: ['一条属于你自己的「每天一步」样板', '一份卡点记录 —— 它就是明天的入口'],
+        linkedGoalIds: ['GLOBAL_MOBILITY'],
+        linkedAttributes: ['foc', 'wil'],
+        prerequisiteTempIds: [],
+        dueHintDays: 3,
+        proof: { criterion: '三个词块、三个自造句与一段卡点记录', kind: 'text' },
+        tags: ['habit', 'minimum_loop'],
+      },
+      {
+        tempId: 'en_seed_10',
+        title: '一次真实使用',
+        subtitle: '语言的考场在真实世界，不在练习题里',
+        narrative:
+          '所有练习都是模拟。真正让一门语言开始属于你的，是第一次用它换来一个真实的结果 —— 一句回复、一次对话、一桩小事的办成。',
+        objective:
+          '在真实场景里使用一次英语，任选一种：发一条英文留言或评论并等来回复；用英文写一封真实的邮件；参加一次线上英语活动，或与真人进行 10 分钟英语对话。事后记录四件事：事前你最担心的点、实际发生了什么、对方的反应、你最想重说的一句表达。',
+        type: 'special',
+        difficulty: 2,
+        effortEstimate: { unit: 'hour', value: 1 },
+        reward: { exp: 200, attributePoints: { cha: 1, wil: 1 } },
+        outcomeHints: ['一次真实的英语使用（不是模拟）', '一份「担心 vs 实际」的对照'],
+        linkedGoalIds: ['GLOBAL_MOBILITY'],
+        linkedAttributes: ['cha', 'wil'],
+        prerequisiteTempIds: [],
+        dueHintDays: 7,
+        proof: { criterion: '使用场景记录（含对方的真实反应）', kind: 'text' },
+        tags: ['real_world', 'courage'],
       },
     ],
   },

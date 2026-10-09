@@ -192,7 +192,12 @@ const dispatcherDecisionSchema: JsonSchema = {
         // PO 2026-10-09 口径：建议 8~40 步（「几十条也是可以接受的」），
         // 硬上限 60 由 adapters 的 MAX_DRAFTS 守。越界由 validate 的 clamp
         // 记 corrections 收拢（不失败）—— 这里收的是**建议值**，不是链本身。
-        suggestedChainLength: { ...{ type: 'integer', minimum: 8, maximum: 40 }, nullable: true },
+        //
+        // 下沿 8 → 3（2026-10-09 三档容量）：回档（中断恢复）要铸的正是
+        // 「三到五步」的最小恢复链 —— 下沿留在 8 的话，那个 4 会被 clamp 回 8，
+        // 回档名存实亡。放宽的是**建议值**：链下限（MIN_DRAFTS=2）不动，
+        // 默认建议仍是 8（directedDecision 与 mock 写死），只有容量=回档时才给 3~5。
+        suggestedChainLength: { ...{ type: 'integer', minimum: 3, maximum: 40 }, nullable: true },
         suggestedType: { type: 'string', enum: QUEST_TYPES },
       },
       required: ['kind', 'suggestedChainLength', 'suggestedType'],
@@ -418,13 +423,62 @@ const blueprintOutputSchema: JsonSchema = {
       },
       2, 4,
     ),
-    // 8~10 条，与 catalog/classes.ts 手工维护的四条线同一档深度。
+    // 8~10 条，与 catalog/classes.ts 手工维护的五条线同一档深度。
     // 这里曾经是 3：新铸的线只能抽一轮，"整链重抽"当场就没新鲜的可抽了 ——
     // 玩家会看到换了一批 id、文案却一模一样的"新"任务。
     seedQuests: arr(questDraftSchema, 8, 10),
     goalAlignment: str(160),
   },
   required: ['classDefinition', 'systemPromptBody', 'recommendedDailies', 'seedQuests', 'goalAlignment'],
+};
+
+/** Diagnostician · 出题段（开局定标第一遍：改写目标 → 出一套混合考卷） */
+const diagnosticSheetSchema: JsonSchema = {
+  type: 'object',
+  properties: {
+    goalReframed: str(120),
+    // 开放集合：建议归属的线，认不认得由适配层过滤（同 GOAL_IDS 撤 enum 的理由 ——
+    // 模型把「英语」写成 english 或 ielts_learner 时，整卷不该连坐作废）。
+    suggestedClassIds: arr(str(40), 0, 3),
+    // 数量口径：3~5 题（1~2 开放 + 2~3 选择）**由适配层收口**（补齐/截断并记 correction）。
+    // 这里只留宽松边界（1~12）：数量越界属于内容层的问题，该被修正，
+    // 不该把整卷（包括那句改写好目标）拒掉降级 —— 2026-10-07 事故的同一条教训。
+    questions: arr(
+      {
+        type: 'object',
+        properties: {
+          kind: { type: 'string', enum: ['open', 'choice'] },
+          prompt: str(200),
+          // 开放题给空数组；选择题 2~4 个候选（收口在适配层）
+          options: arr(str(60), 0, 6),
+        },
+        required: ['kind', 'prompt', 'options'],
+      },
+      1, 12,
+    ),
+  },
+  required: ['goalReframed', 'suggestedClassIds', 'questions'],
+};
+
+/** Diagnostician · 判分段（开局定标第二遍：只判当前水准，写基线） */
+const diagnosticVerdictSchema: JsonSchema = {
+  type: 'object',
+  properties: {
+    levelLabel: str(40),
+    summary: str(240),
+    // 维度 2~6 个由适配层收口；score 越界由 validate 的 clamp 收拢（不失败）
+    dimensions: arr(
+      {
+        type: 'object',
+        properties: { key: str(24), label: str(24), score: num(0, 100) },
+        required: ['key', 'label', 'score'],
+      },
+      1, 8,
+    ),
+    strengths: arr(str(80), 0, 6),
+    gaps: arr(str(80), 0, 6),
+  },
+  required: ['levelLabel', 'summary', 'dimensions', 'strengths', 'gaps'],
 };
 
 // ---------------------------------------------------------------------------
@@ -449,6 +503,14 @@ export const SCHEMAS = {
    * 因为改法不是一个新的 Agent 种类，见 prompts/index.ts 的 REROUTE_PROMPT）。
    */
   rerouteDraft: questDraftSchema,
+  /** 开局定标 · 出题（kind=diagnostician 的默认 schema） */
+  diagnosticSheet: diagnosticSheetSchema,
+  /**
+   * 开局定标 · 判分。
+   * 与出题共用同一个 Agent，调用时以 `schemaName: 'diagnosticVerdict'` 显式覆盖 ——
+   * 与 rerouteDraft 同一手法（一个 Agent 的两段式输出，各有一份契约）。
+   */
+  diagnosticVerdict: diagnosticVerdictSchema,
 } as const;
 
 export type SchemaName = keyof typeof SCHEMAS;
@@ -462,6 +524,8 @@ export type SchemaName = keyof typeof SCHEMAS;
  *   network_advisor 0.6 —— 需要一点人情味
  *   arbiter         0.1 —— 判分必须极其稳定，同一份复盘今天 6 分明天 9 分是灾难
  *   blueprint       0.5 —— 需要创造力，但结构必须严谨
+ *   diagnostician   0.3 —— 一个 Agent 两段活：出题要一点灵活（0.3），
+ *                          判分要稳（判分段的稳定性守在判据里：只读答案、不读心情）
  */
 export const DEFAULT_AGENT_RUNTIME = {
   dispatcher: { temperature: 0.2, topP: 0.9, maxTokens: 1200 },
@@ -480,6 +544,10 @@ export const DEFAULT_AGENT_RUNTIME = {
   network_advisor: { temperature: 0.6, topP: 0.95, maxTokens: 1200 },
   arbiter: { temperature: 0.1, topP: 0.9, maxTokens: 1000 },
   blueprints: { temperature: 0.5, topP: 0.95, maxTokens: 4000 },
+  // 定标是"小输出走快路径"：一卷 3~5 题 / 一份基线，1500 绰绰有余。
+  // ⚠️ 它**不进** DEEP_CHAIN_RUNTIME（那一档是给几十步长链的思考预算）——
+  //    卷子和基线都不需要"先想四分钟再动笔"，想太久反而会把简单判分想复杂。
+  diagnostician: { temperature: 0.3, topP: 0.9, maxTokens: 1500 },
 } as const;
 
 /** 本地兜底（mock）时使用的固定返回，保证离线也能玩 */
