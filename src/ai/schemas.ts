@@ -189,8 +189,10 @@ const dispatcherDecisionSchema: JsonSchema = {
       type: 'object',
       properties: {
         kind: { type: 'string', enum: ['single', 'chain'] },
-        // 轮 C 口径：一条线 3~5 步。越界由 validate 的 clamp 记 corrections 收拢（不失败）
-        suggestedChainLength: { ...{ type: 'integer', minimum: 3, maximum: 5 }, nullable: true },
+        // PO 2026-10-09 口径：建议 8~40 步（「几十条也是可以接受的」），
+        // 硬上限 60 由 adapters 的 MAX_DRAFTS 守。越界由 validate 的 clamp
+        // 记 corrections 收拢（不失败）—— 这里收的是**建议值**，不是链本身。
+        suggestedChainLength: { ...{ type: 'integer', minimum: 8, maximum: 40 }, nullable: true },
         suggestedType: { type: 'string', enum: QUEST_TYPES },
       },
       required: ['kind', 'suggestedChainLength', 'suggestedType'],
@@ -238,7 +240,12 @@ const classAgentOutputSchema: JsonSchema = {
       //    必填只该留给"缺了就真的不成链"的东西。
       nullable: true,
     },
-    quests: arr(questDraftSchema, 1, 7),
+    // 上限 200 是**荒谬界**，不是链长口径 —— 2026-10-09 起一条链的硬上限是
+    // 60 步，但它在**适配层**守（adapters.MAX_DRAFTS：超出的截断并留痕）。
+    // 若 schema 也卡 60，一条 65 步的回复会在校验期被整稿拒掉、降级回本地
+    // 轨道 —— 玩家手里的长链反而掉成 5 步模板，那是"没接住"，不是"拦住了"。
+    // 曾长期是 7（轮 C 口径的余量）：那才是静默截断，比适配层更早、更隐蔽。
+    quests: arr(questDraftSchema, 1, 200),
     closingNote: str(80),
     uncertainties: arr(str(100), 0, 5),
   },
@@ -251,7 +258,8 @@ const chainReviewOutputSchema: JsonSchema = {
   properties: {
     approved: { type: 'boolean' },
     reviewerNote: str(120),
-    revisedQuests: arr(questDraftSchema, 1, 7),
+    // 上界同 quests：审核官修订的正是那副原始稿，链长跟着走（200 是荒谬界）。
+    revisedQuests: arr(questDraftSchema, 1, 200),
     revisionInstructions: arr(str(120), 0, 6),
     difficultyCurve: {
       type: 'object',
@@ -262,7 +270,7 @@ const chainReviewOutputSchema: JsonSchema = {
       type: 'object',
       properties: {
         passed: { type: 'boolean' },
-        leakingTempIds: arr(str(40), 0, 7),
+        leakingTempIds: arr(str(40), 0, 200), // 上界同 quests（泄漏清单再长也不超过链长）
         comment: str(80),
       },
       required: ['passed', 'leakingTempIds', 'comment'],
@@ -277,12 +285,12 @@ const chainReviewOutputSchema: JsonSchema = {
             properties: { fromTempId: str(40), toTempId: str(40), issue: str(100) },
             required: ['fromTempId', 'toTempId', 'issue'],
           },
-          0, 7,
+          0, 200, // 上界同 quests（断口数不可能超过链长）
         ),
       },
       required: ['passed', 'brokenJoints'],
     },
-    finalOrder: arr(str(40), 1, 7),
+    finalOrder: arr(str(40), 1, 200), // 上界同 quests —— 排的就是刚审过的那条链
   },
   required: ['approved', 'reviewerNote', 'revisedQuests', 'revisionInstructions', 'difficultyCurve', 'spoilerCheck', 'continuityCheck', 'finalOrder'],
 };
@@ -458,12 +466,16 @@ export type SchemaName = keyof typeof SCHEMAS;
 export const DEFAULT_AGENT_RUNTIME = {
   dispatcher: { temperature: 0.2, topP: 0.9, maxTokens: 1200 },
   // class 3000 → 6000：2026-10-07 的存档审计里，一条**三步**链的实际输出已经
-  // 写到 2259 token —— 顶到 3000 的 75%。中文的 token 密度本就偏高，再加到
-  // 五步（轮 C 的口径），3000 是必然要破的线，而破线的那一刻就是截断
-  // （invalid_json，账已付、内容全废）。maxTokens 是天花板不是预算，抬它不花钱。
+  // 写到 2259 token —— 顶到 3000 的 75%。中文的 token 密度本就偏高，3000 是
+  // 必然要破的线，而破线的那一刻就是截断（invalid_json，账已付、内容全废）。
+  // maxTokens 是天花板不是预算，抬它不花钱。
+  // ⚠️ 这里只是"未带 override 时的默认"。任务链生成 / 重抽 / 审核三处走
+  //    thunks 的 DEEP_CHAIN_RUNTIME（打开思考 + 393216 上限），不落在这里；
+  //    「换个做法」同属 class 种类但走的就是这个 6000 默认（单步小输出）。
   class: { temperature: 0.7, topP: 0.95, maxTokens: 6000 },
   // chain_reviewer 3000 → 6000：审核官要把整条链**复述回来**（revisedQuests 是
   // 完整草稿），输出天然是生成那一棒的一到两倍 —— 3000 对它从一开始就是小鞋。
+  // 同 class：真实调用经 DEEP_CHAIN_RUNTIME 提额，这里只是兜底默认。
   chain_reviewer: { temperature: 0.2, topP: 0.9, maxTokens: 6000 },
   network_advisor: { temperature: 0.6, topP: 0.95, maxTokens: 1200 },
   arbiter: { temperature: 0.1, topP: 0.9, maxTokens: 1000 },

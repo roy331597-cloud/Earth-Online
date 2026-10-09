@@ -222,10 +222,12 @@ export const chatCompletion = async (
     //    deepseek-flash 的思考模式**默认开着**，且思考与正文共享 max_tokens：
     //    本项目的提示词是按非思考模型调校的，让它先想满三千 token 再开口，
     //    等于把正文挤没 —— 2026-10-07 线上就是这样连续三次空内容
-    //    （finish_reason='length'，见 describeEmptyContent）。这里明确关掉。
-    //    若将来要为「深度推演」打开思考，那应该是一个显式的运行时开关，
-    //    而不是让这个默认值回来。
-    ...(cfg.baseUrl.includes('deepseek') ? { thinking: { type: 'disabled' } } : {}),
+    //    （finish_reason='length'，见 describeEmptyContent）。
+    //    因此**默认关**；要用思考的调用（任务链生成）在 runtime 里显式带
+    //    thinking:'enabled' —— 那是运行时开关，不是让这个默认值回来。
+    ...(cfg.baseUrl.includes('deepseek')
+      ? { thinking: { type: call.runtime.thinking ?? 'disabled' } }
+      : {}),
     stream: false,
   });
 

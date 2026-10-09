@@ -25,6 +25,7 @@
 //   ㉞ 手写任务（直接进「进行中」）  ㉟ 出题处方（两份素材、雾不外泄）
 //   ㊱ 云同步原语（口令 → 钥匙 → 密文）  ㊲ 云同步协议（假服务器走穿全流程）
 //   ㊳ 云同步端到端（起一台**真服务器**，与真客户端对穿）
+//   ㊴ 任务链口径一致（提示词 / schema / 代码三处对得上）
 //
 // ①–⑨ 验的是**写**（状态怎么流转）；⑩–⑬ 验的是**读**（selector 从状态里读出什么）。
 // 读错了不抛异常，只会安静地显示一个错的东西 —— 所以更值得钉住。
@@ -450,7 +451,7 @@ try {
   // 用 sourceIdea 认出"刚铸出来的那一批"，而不是拿 draftQuests()[0] ——
   // 后者会取到存档里本来就有的草稿（order 里排在前面），那样测的就不是铸造了
   const minted = draftQuests(s4).filter((q) => q.origin.sourceIdea === IDEA);
-  check('铸出 5 条草稿（原 1 条 + 新 5 条 —— 一条线 3~5 步，取上限）', minted.length, 5);
+  check('铸出 5 条草稿（原 1 条 + 新 5 条 —— 本地轨道口径：一次取 5；AI 轨道上限是 60）', minted.length, 5);
   check('存档里草稿总数 1 → 6', draftQuests(s4).length, draftsBefore + 5);
   check('全部落在 draft（铸造 ≠ 生效）', minted.every((q) => q.status === 'draft'), true);
   check('未勾深度推演 → 无参谋意见', minted[0].origin.reviewed, false);
@@ -475,8 +476,9 @@ try {
   );
 
   // 链内前置：第 1 步无前置，其余每一步各以前一步为前置。
-  // ⚠️ 步数不写死：链长由 MAX_DRAFTS 定（轮 C 起是 5），这里验的是**形状**
-  //    —— 连续编号、首尾相接、total 一致 —— 而不是"恰好 3 步"那个数。
+  // ⚠️ 步数不写死：这一段走的是**本地轨道**，链长由 mockForge 的 MAX_DRAFTS 定
+  //    （是 5；AI 轨道 2026-10-09 起是 60）—— 这里验的是**形状**
+  //    —— 连续编号、首尾相接、total 一致 —— 而不是"恰好几步"那个数。
   const chainQuests = newChain.questIds.map((id) => s4.quests.byId[id]);
   check('链内第 1 步无前置', chainQuests[0].prerequisiteQuestIds, []);
   check(
@@ -1829,7 +1831,8 @@ try {
   check('归档的是"那几条旧的"，不是新来的', rgOldIds.every((id) => rgOnce.quests.archivedIds.includes(id)), true);
   check('新成员不进归档（它们正是要被展示的那一批）', rgChainAfter.questIds.some((id) => rgOnce.quests.archivedIds.includes(id)), false);
   // 池子有多深、一次取几条，一起决定了"重抽能不能真的换一批"：
-  // 目录每条线 9 条种子，而 MAX_DRAFTS 轮 C 起是 5 —— 所以第一次重抽是
+  // 目录每条线 9 条种子，而 mockForge 的 MAX_DRAFTS 是 5（本地轨道口径；
+  // AI 轨道 2026-10-09 起是 60）—— 所以第一次重抽是
   // **4 条没出过的 + 1 条重出**（fresh 先用，不够才补旧的，见 mockForge）。
   // 要把整链重抽也换到全 fresh，池子得 ≥ 10 条 —— 那件事列在
   // 「种子池重标定」那一轮里（内容品味活，要 PO 一起过）。这里先把
@@ -1872,6 +1875,19 @@ try {
     '目录：每条线不止一种工时单位（8 条全是 2 小时的题，池子再深也是同一种日子）',
     CLASSES.every((c) => new Set(c.seedQuests.map((s) => s.effortEstimate.unit)).size >= 2),
     true,
+  );
+  // 颗粒度闸（2026-10-09 PO 裁定）：一步 = 15 分钟 ~ 2 小时、当天完成，不许跨天。
+  // 池子是本地轨道**直接发给玩家**的东西 —— 提示词的约束管不到它，此前也没有
+  // 任何断言拦着"6 小时"或"60 天"量级的种子（那份池子里真的躺着一批）。
+  const seedEffortOk = (s) => {
+    const { unit, value } = s.effortEstimate;
+    if (unit === 'day') return false;
+    return unit === 'hour' ? value <= 2 : value <= 120;
+  };
+  check(
+    '目录：种子颗粒度全部落在 15 分钟 ~ 2 小时（无 day 单位；hour ≤ 2 / min ≤ 120）',
+    CLASSES.flatMap((c) => c.seedQuests.filter((s) => !seedEffortOk(s)).map((s) => `${c.classId}/${s.tempId}`)),
+    [],
   );
 
   // 连续三轮整链重抽：每一轮都把上一轮出过的标题喂回去（regenerateQuestChain 内部
@@ -2451,7 +2467,9 @@ try {
   //
   // 2026-10-07 线上事故的原样复现：deepseek-flash 的思考模式默认开着，
   // 思考与正文共享 max_tokens —— 三次尝试的思考都吃满了那张输出上限
-  // （class 档，事故当时是 3000，现在按审计证据抬到了 6000），
+  // （class 档，事故当时是 3000，随后抬到 6000）。
+  // 2026-10-09 起生成这一棒走 DEEP_CHAIN_RUNTIME（思考恒开 + 393216，
+  // PO 裁定不设 token 上限）—— 这台夹具按新天花板复现：思考真的能吃满它，
   // 正文一个字没开始（finish_reason='length'，content 为空）。
   // 旧版的处方有两处不对，这次各钉一条：
   //   ① 话说反了 —— 一律报"可能触发了内容策略"，把玩家引向改措辞，
@@ -2465,7 +2483,7 @@ try {
         finish_reason: 'length',
       },
     ],
-    usage: { prompt_tokens: 800, completion_tokens: 6000 },
+    usage: { prompt_tokens: 800, completion_tokens: 393216 },
   };
   const emptyFetch = makeFetch(liveDispatch('investor'), { __rawBody: EMPTY_RAW });
   const emptyH = harness(toLive(createMockState()), { apiKey: T_KEY, fetchImpl: emptyFetch });
@@ -2474,21 +2492,23 @@ try {
     [emptyRes.ok, emptyRes.source], [true, 'mock']);
   check('空内容：一次操作只弹一条提示（不把同一件事念三遍）', emptyH.notices.length, 1);
   check('空内容：提示说真话 —— 指到思考占满输出上限，而不是猜"内容策略"',
-    emptyH.notices[0].body.includes('思考过程占满了输出上限 6000 token'), true);
+    emptyH.notices[0].body.includes('思考过程占满了输出上限 393216 token'), true);
   check('空内容："内容策略"这四个字从提示里消失了（旧版就是它把方向引偏的）',
     emptyH.notices[0].body.includes('内容策略'), false);
   check('空内容：重试照打 —— 一次操作共 1 次调度 + 3 次生成',
     emptyFetch.sends.length, 4);
   // 调度那两次的调用是成功的（makeFetch 的默认用量 120/240），
-  // 生成这一棒三次尝试各报 800/6000 —— 账本上应当一笔不多、一笔不少。
+  // 生成这一棒三次尝试各报 800/393216 —— 账本上应当一笔不多、一笔不少。
   check('空内容：三次尝试烧掉的 token 全数入账（不像旧版那样记 0）',
     [used(emptyH.state, 'tokensIn'), used(emptyH.state, 'tokensOut')],
-    [120 + 3 * 800, 240 + 3 * 6000]);
+    [120 + 3 * 800, 240 + 3 * 393216]);
   check('空内容：账上落了钱（账本不该因为"结果不能用"就少一笔）',
     used(emptyH.state, 'costUsdCents') > 0, true);
-  check('出厂请求体明确关掉了思考（flash 默认开着它，而它会把正文挤没）',
+  // 2026-10-09 PO 裁定后的新分工：调度这一棒照旧明关思考（路由要快、要稳），
+  // 生成这一棒明确打开（想清楚再拆步 —— 十几步的链正是从这里来）。
+  check('出厂请求体：调度明关思考，生成明开 —— 两棒的开关各就各位',
     [JSON.parse(emptyFetch.sends[0].body).thinking, JSON.parse(emptyFetch.sends[1].body).thinking],
-    [{ type: 'disabled' }, { type: 'disabled' }]);
+    [{ type: 'disabled' }, { type: 'enabled' }]);
 
   // 另一种空法：连候选都没有 —— 话要跟着证据换，不能穿同一条裤子上台
   const noChoiceFetch = makeFetch(liveDispatch('investor'), {
@@ -2530,15 +2550,29 @@ try {
   check('tempId 撞名 → 后来者改名，三条任务是三个 id',
     [dupIds.length, new Set(dupIds).size], [3, 3]);
 
-  // 语义层的拦：模型给了一条超长的链（轮 C 起上限是 5 步）
-  const fourFetch = makeFetch(
-    liveDispatch('investor'),
-    liveClassOut([liveDraft(1), liveDraft(2), liveDraft(3), liveDraft(4), liveDraft(5), liveDraft(6)]),
+  // 语义层的拦：模型给了一条超长的链（2026-10-09 起：一条链的硬上限是 60 步）
+  //
+  // ⚠️ 为什么夹具是 65 步、而不是"刚好多 1"：schema 的数组上界刻意留宽到 200
+  //    （荒谬界）—— 若 schema 也卡 60，65 步的回复会先被校验期整稿拒掉、
+  //    降级回本地轨道，玩家手里的长链反而掉成 5 步模板。超纲一小截的处分是
+  //    **适配层截断 + 留痕**，不是把整副稿拒掉。
+  const manyDrafts = (n) => Array.from({ length: n }, (_, i) => liveDraft(i + 1));
+  const overFetch = makeFetch(liveDispatch('investor'), liveClassOut(manyDrafts(65)));
+  const overH = harness(toLive(createMockState()), { apiKey: T_KEY, fetchImpl: overFetch });
+  const overRes = await overH.thunks.forgeChain({ idea: LIVE_IDEA, classId: null, deepDeliberation: false });
+  check('模型给了 65 步 → 截到 60 步（硬上限；多出来的不许进存档）', overRes.data.stepCount, 60);
+  check('截断这件事也留下痕迹', overRes.corrections.some((c) => c.includes('截到')), true);
+  check('超纲一小截仍是真身铸的（截断，不是把整副稿拒回模板）', overRes.source, 'api');
+
+  // 反向的一半：旧 schema 上限（7）会在校验期**静默截掉**长链 —— 12 步必须全数进存档
+  const twelveFetch = makeFetch(liveDispatch('investor'), liveClassOut(manyDrafts(12)));
+  const twelveH = harness(toLive(createMockState()), { apiKey: T_KEY, fetchImpl: twelveFetch });
+  const twelveRes = await twelveH.thunks.forgeChain({ idea: LIVE_IDEA, classId: null, deepDeliberation: false });
+  check(
+    '模型给 12 步 → 12 步全数进存档（长链不再被校验器偷走）',
+    twelveH.state.quests.chains[twelveRes.data.chainId].questIds.length,
+    12,
   );
-  const fourH = harness(toLive(createMockState()), { apiKey: T_KEY, fetchImpl: fourFetch });
-  const fourRes = await fourH.thunks.forgeChain({ idea: LIVE_IDEA, classId: null, deepDeliberation: false });
-  check('模型给了 6 步 → 截到 5 步（一条线 3~5 步，多出来的不许进存档）', fourRes.data.stepCount, 5);
-  check('截断这件事也留下痕迹', fourRes.corrections.some((c) => c.includes('截到')), true);
 
   // ===== 目标 id：模型自造一个 id，不该毁掉整次调用 =====
   //
@@ -5384,6 +5418,85 @@ try {
 
   await stopRealSync(real2);
   // 目录与进程的最终清理在文件尾的 finally —— 断言抛了也不留孤儿
+
+  // -------------------------------------------------------------------------
+  console.log('\n【㊴ 任务链口径一致：提示词 / schema / 代码三处对得上】');
+  // -------------------------------------------------------------------------
+  // 2026-10-09 PO 裁定：每步 15 分钟 ~ 2 小时、当天完成；链长建议 8~40、上限 60；
+  // 生成任务链恒开深度思考、不设 token 上限。这套口径散落在提示词、schema、
+  // 适配层与 thunks 四处 —— 只改一处不会报错：要么 AI 继续按旧口径铸链，
+  // 要么新接的思考开关静默失效（"接上了但没人开"）。这类漂移只能被断言钉住。
+  const promptDir = join(root, 'src/ai/prompts');
+  const promptFiles = readdirSync(promptDir).filter((f) => f.endsWith('.md')).sort();
+  const promptText = (f) => readFileSync(join(promptDir, f), 'utf8');
+
+  // —— 提示词：新颗粒度在场，旧口径绝迹 ——
+  const requiredPrompts = [
+    '00-shared-context.md', '10-dispatcher.md', '20-class-computational-biology.md',
+    '21-class-investor.md', '22-class-influencer.md', '23-class-entrepreneur.md',
+    '24-class-blueprint-generator.md', '30-network-advisor.md', '40-arbiter.md',
+    '50-chain-reviewer.md', '60-reroute.md',
+  ];
+  check('十一份提示词一份不缺', requiredPrompts.filter((f) => !promptFiles.includes(f)), []);
+  const granularFiles = [
+    '00-shared-context.md', '10-dispatcher.md', '20-class-computational-biology.md',
+    '24-class-blueprint-generator.md', '50-chain-reviewer.md',
+  ];
+  check(
+    '写着颗粒度的每一份都写着「15 分钟 ~ 2 小时」',
+    granularFiles.filter((f) => !promptText(f).includes('15 分钟 ~ 2 小时')),
+    [],
+  );
+  const chainLenFiles = ['00-shared-context.md', '10-dispatcher.md', '20-class-computational-biology.md', '50-chain-reviewer.md'];
+  check(
+    '写着链长的每一份都写着「8~40」并给出 60 的上限',
+    chainLenFiles.filter((f) => !/8~40/.test(promptText(f)) || !/60/.test(promptText(f))),
+    [],
+  );
+  check(
+    '旧口径的字样绝迹（「3~5 步」「30 分钟 ~ 4 小时」「2~4 小时」一份都不许留）',
+    promptFiles.filter((f) => /3~5\s*步/.test(promptText(f))
+      || /30\s*分钟\s*~\s*4\s*小时/.test(promptText(f))
+      || /2~4\s*小时/.test(promptText(f))),
+    [],
+  );
+  check('reroute 的地板跟着口径走（不给 15 分钟以下的任务）', promptText('60-reroute.md').includes('15 分钟以下'), true);
+
+  // —— 代码：思考开关接线（2026-10-09 第一次用上 runtimeOverrides 这条管线） ——
+  const gatewaySrc = readFileSync(join(root, 'src/ai/gateway.ts'), 'utf8');
+  const thunksSrc = readFileSync(join(root, 'src/ai/thunks.ts'), 'utf8');
+  const schemasSrc = readFileSync(join(root, 'src/ai/schemas.ts'), 'utf8');
+  const adaptersSrc = readFileSync(join(root, 'src/ai/adapters.ts'), 'utf8');
+  const mockForgeSrc = readFileSync(join(root, 'src/lib/mockForge.ts'), 'utf8');
+  check(
+    '网关把运行时的思考开关写进请求体（默认关，由调用方按需打开）',
+    /thinking:\s*\{\s*type:\s*call\.runtime\.thinking\s*\?\?\s*'disabled'\s*\}/.test(gatewaySrc),
+    true,
+  );
+  check(
+    '深想常量：thinking 恒开 + 393216（PO：不设 token 上限，天花板不是预算）',
+    thunksSrc.includes("thinking: 'enabled'") && thunksSrc.includes('393216'),
+    true,
+  );
+  check(
+    '深想恰好喂三处：forgeChain 的生成与审核、regenerateChain（reroute 保持快默认）',
+    (thunksSrc.match(/runtimeOverrides: DEEP_CHAIN_RUNTIME/g) ?? []).length,
+    3,
+  );
+  check(
+    'schema 的数组上界是 200 的荒谬界 —— 60 的硬上限交给适配层截断留痕（不是整稿拒掉）',
+    [
+      /quests: arr\(questDraftSchema, 1, 200\)/.test(schemasSrc),
+      /revisedQuests: arr\(questDraftSchema, 1, 200\)/.test(schemasSrc),
+      /finalOrder: arr\(str\(40\), 1, 200\)/.test(schemasSrc),
+    ],
+    [true, true, true],
+  );
+  check(
+    '两条轨道各自的 MAX_DRAFTS：AI 60 / 本地 5（数值本身也钉住，不只靠互指注释）',
+    [/const MAX_DRAFTS = 60;/.test(adaptersSrc), /const MAX_DRAFTS = 5;/.test(mockForgeSrc)],
+    [true, true],
+  );
 
 } catch (err) {
   failed += 1;

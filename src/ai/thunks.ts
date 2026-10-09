@@ -260,6 +260,35 @@ const noticeFor = (reason: NonNullable<BusEffect['reason']>): Notice => {
 };
 
 // ---------------------------------------------------------------------------
+// 任务链生成的两棒都开深度思考（2026-10-09 PO 裁定）
+// ---------------------------------------------------------------------------
+
+/**
+ * 生成与审核两棒的运行时覆盖：**显式打开思考模式**，并把输出上限顶到
+ * 模型文档上限。
+ *
+ * - `thinking: 'enabled'` —— 让模型先想再写。一条链要拆到几十步、每步
+ *   15 分钟 ~ 2 小时，规划本身就值得花 token；这是 2026-10-07 事故修复时
+ *   特意留的那个「显式运行时开关」（见 gateway.ts 里那段注释），现在第一次用上。
+ *   别的小决策（调度、改法、顾问、判官）保持默认关闭 —— 快而省，
+ *   且它们输出短、不太吃规划。
+ * - `maxTokens: 393216` —— PO 裁定「不必设置任务链的 token 上限」。这是
+ *   deepseek-flash 的文档输出上限（384K）；max_tokens 是**天花板不是预算**，
+ *   顶到模型上限不花钱。几十步的链与思考 token 共享这一份额度，不会被截断。
+ *   代价要说清：思考 token 按输出计费，等待也变长 —— 这是换「更小更具体」
+ *   付的账，PO 已知并接受。
+ * - `timeoutMs: 240_000` —— 思考 + 长输出的往返远超默认 60s。
+ *
+ * ⚠️ 只喂给**任务链生成 / 整链重抽 / 深度推演审核**三处（见各自调用点）。
+ *    「换个做法」（reroute）同属 class 种类，但输出只有一步，保持默认快路径。
+ */
+const DEEP_CHAIN_RUNTIME: Partial<AgentRuntimeConfig> = {
+  thinking: 'enabled',
+  maxTokens: 393216,
+  timeoutMs: 240_000,
+};
+
+// ---------------------------------------------------------------------------
 // 跑一次调用（私有）
 // ---------------------------------------------------------------------------
 
@@ -410,7 +439,9 @@ const directedDecision = (idea: string, classId: ClassIdLiteral): DispatcherDeci
     rationale: '玩家直接指定了这条职业线，无需调度员判定',
   },
   proposedClass: null,
-  questShape: { kind: 'chain', suggestedChainLength: 3, suggestedType: 'side' },
+  // 8 = PO 2026-10-09 口径的下沿（建议 8~40，上限 60）。玩家直点职业线时
+  // 没有一个真调度员给厚度建议，取"建议带"的下沿是诚实的默认值。
+  questShape: { kind: 'chain', suggestedChainLength: 8, suggestedType: 'side' },
   linkedGoalIds: [...(getClass(classId)?.linkedGoalIds ?? [])],
   clarification: null,
   recommendDeepDeduction: false,
@@ -521,6 +552,8 @@ export const createThunks = (deps: ThunkDeps) => {
       // 蓝图为新职业线生成的提示词将在 Phase 5 从这里接进来（按 classId 查库）
       rolePrompt: CLASS_PROMPT_REF[classId] ?? ROLE_PROMPTS.dispatcher,
       payload: buildClassPayload(state0, { classId, idea, decision }, now),
+      // 深想 + 不设 token 上限：几十步的链从这里来（见 DEEP_CHAIN_RUNTIME）
+      runtimeOverrides: DEEP_CHAIN_RUNTIME,
       mock: () =>
         mockClassAgentOutput({
           idea,
@@ -551,6 +584,8 @@ export const createThunks = (deps: ThunkDeps) => {
         label: '审核官正在逐条过稿…',
         rolePrompt: ROLE_PROMPTS.chain_reviewer,
         payload: buildReviewerPayload(state0, { draft: classOut, idea }),
+        // 审核官要把整条链（可能几十步）复述回来 —— 同样深想、同样不设上限
+        runtimeOverrides: DEEP_CHAIN_RUNTIME,
         mock: () => mockChainReviewOutput({ drafts: classOut.quests }),
       }, said);
       if (reviewRun === null) {
@@ -664,6 +699,8 @@ export const createThunks = (deps: ThunkDeps) => {
         },
         now,
       ),
+      // 重抽与首发同规格：深想、不设 token 上限
+      runtimeOverrides: DEEP_CHAIN_RUNTIME,
       mock: () =>
         mockClassAgentOutput({
           idea,

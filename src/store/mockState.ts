@@ -214,7 +214,7 @@ const CHAIN_RISK = {
 } as const;
 
 const QUESTS: Quest[] = [
-  // —— 已完成：这条任务的复盘拿了 8% 加成，是成功日记里唯一一条 ——
+  // —— 已完成：这条任务的复盘拿了 9% 加成，是成功日记里唯一一条 ——
   mkQuest({
     id: 'q_cb_repro_figure',
     status: 'completed',
@@ -226,7 +226,7 @@ const QUESTS: Quest[] = [
     startedAt: '2026-09-29T01:00:00.000Z',
     turnInOpenedAt: '2026-10-06T13:22:00.000Z',
     completedAt: T.reproductionDone,
-    actualEffortMinutes: 260,
+    actualEffortMinutes: 130,
     journalEntryId: 'jr_0001',
     proofSubmitted: 'notebooks/repro_main_figure.ipynb（含运行输出与 diff 注释）',
     origin: {
@@ -234,14 +234,14 @@ const QUESTS: Quest[] = [
       sourceIdea: '想把收藏夹里的论文真正跑通一遍，而不是只收藏',
       generatedAt: '2026-09-28T11:56:00.000Z',
       reviewed: true,
-      reviewerNote: '把「至少 3 处差异」写成硬性项是对的：差异才是你真正学到的东西。',
+      reviewerNote: '把「找出差异」做成必答题是对的：复现的价值全在你对不上原文的那些地方。',
     },
     grant: {
-      base: { exp: 180 },
-      bonusPct: 8,
-      final: { exp: 194 },
+      base: { exp: 260 },
+      bonusPct: 9,
+      final: { exp: 283 },
       grantedAt: T.reproductionDone,
-      bonusReason: '复盘指出了差异的归因方式，属于方法层面的洞见（难度 2 · sharp → 8%）',
+      bonusReason: '复盘指出了差异的归因方式，属于方法层面的洞见（难度 3 · sharp → 9%）',
     },
   }),
 

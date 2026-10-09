@@ -72,7 +72,7 @@ JSON（见 `ClassAgentInput`）：`rawIdea`、`dispatch`、`career`、`playerSna
       "objective": "可判定的目标陈述，含明确的完成标准与数量（≤200字）",
       "type": "side",
       "difficulty": 4,
-      "effortEstimate": { "unit": "hour", "value": 3 },
+      "effortEstimate": { "unit": "hour", "value": 2 },
       "reward": { "exp": 480 },
       "outcomeHints": ["完成后手里多出来的具体东西"],
       "linkedGoalIds": ["PRIVATE_LAB"],
@@ -90,9 +90,10 @@ JSON（见 `ClassAgentInput`）：`rawIdea`、`dispatch`、`career`、`playerSna
 
 链式生成时：`mode = "chain"`，`chain` 字段填 `title`（≤14 字）/`rationale`（一句为什么）/
 `estimatedTotalEffort`/`deliverables`，`quests` 按**解锁顺序**排列（第一个在前），
-用 `prerequisiteTempIds` 表达依赖。一条链 **3~5 步**，每步 30 分钟 ~ 4 小时、
+用 `prerequisiteTempIds` 表达依赖。一条链 **8~40 步（上限 60）**，每步 15 分钟 ~ 2 小时、
 一天内完成，第一步 ≤1 小时；确认后玩家只会先看到第一步，所以后置步骤的标题与正文
-都不许提前说破前序步骤会发现的结论。
+都不许提前说破前序步骤会发现的结论。拆步的标准是"坐下一次就能做完并留下产物"——
+把两小时的活拆成几件半小时的活，比给一条五步的粗线好。
 
 ## 禁止项
 
@@ -118,7 +119,7 @@ JSON（见 `ClassAgentInput`）：`rawIdea`、`dispatch`、`career`、`playerSna
       "objective": "选择一篇近三年内、有公开数据的研究论文，下载其原始数据，用你自己的代码复现其主图，并记录至少 3 处与原文的差异及可能原因。",
       "type": "side",
       "difficulty": 4,
-      "effortEstimate": { "unit": "hour", "value": 3 },
+      "effortEstimate": { "unit": "hour", "value": 2 },
       "reward": { "exp": 480 },
       "outcomeHints": ["一份可复现的 notebook", "对论文与代码之间鸿沟的第一次体感"],
       "linkedGoalIds": ["PRIVATE_LAB"],

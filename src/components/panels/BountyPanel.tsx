@@ -790,7 +790,8 @@ function LineReviewCard({ chain }: { chain: QuestChain }) {
         {chain.rationale}
       </p>
 
-      <ol className="mt-3 space-y-1.5">
+      {/* 长链（几十步）要在这张卡里滚得动 —— 不然一张 60 步的预览卡会把整页拉长 */}
+      <ol className="mt-3 max-h-[40vh] space-y-1.5 overflow-y-auto pr-0.5">
         {steps.map((q) => (
           <li
             key={q.id}

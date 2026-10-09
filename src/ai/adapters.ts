@@ -78,8 +78,13 @@ export interface Adapted<T> {
   corrections: string[];
 }
 
-/** 一条链的任务数上限。与 mockForge 的 MAX_DRAFTS 同一个产品口径（轮 C：3~5 步） */
-const MAX_DRAFTS = 5;
+/**
+ * AI 轨道的一条链任务数上限（PO 2026-10-09：上限 60 步，建议 8~40）。
+ * ⚠️ mockForge 里**另有一个** MAX_DRAFTS = 5 —— 那是本地轨道：池子只有 9 条
+ *    种子，取 5 才能让「整链重抽」有 4 条全新可换（verify-ops ㉒ 钉死的数学）。
+ *    两条轨道各有各的诚实口径，不是笔误，改一处前先读另一处。
+ */
+const MAX_DRAFTS = 60;
 const MIN_DRAFTS = 2;
 
 /** 合法的里程碑标签（44 条封闭词表）。模型自创的标签一律拦在这里 */
@@ -328,7 +333,7 @@ export const adaptClassOutput = (
   if (ctx.review) drafts = applyFinalOrder(drafts, ctx.review.finalOrder);
 
   if (drafts.length > MAX_DRAFTS) {
-    corrections.push(`模型给了 ${drafts.length} 步，已截到 ${MAX_DRAFTS} 步（一条链不该长到让人望而生畏）`);
+    corrections.push(`模型给了 ${drafts.length} 步，已截到 ${MAX_DRAFTS} 步（一条链的硬上限是 60 步）`);
     drafts = drafts.slice(0, MAX_DRAFTS);
   }
   if (drafts.length === 1) {

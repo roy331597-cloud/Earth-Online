@@ -77,8 +77,8 @@
 
 ## 工作量
 
-`effortEstimate` 要跟着缩水。一个降了两档的任务，不该还标着 4 小时。
-但它有地板：**不要给 30 分钟以下的估算** —— 一件没有重量的事不配叫任务。
+`effortEstimate` 要跟着缩水。一个降了两档的任务，不该还标着 2 小时。
+但它有地板：**不要给 15 分钟以下的估算** —— 一件没有重量的事不配叫任务。
 
 ## 禁止项
 
@@ -98,7 +98,7 @@
     "title": "跑通 Fasta 解析并统计碱基组成",
     "objective": "用 Biopython 解析 20 条序列，输出 GC 含量表，写进 notebook",
     "difficulty": 4,
-    "effortEstimate": { "unit": "hour", "value": 4 },
+    "effortEstimate": { "unit": "hour", "value": 2 },
     "reward": { "exp": 480 },
     "tags": ["bioinformatics", "python"]
   },

@@ -79,6 +79,13 @@ export interface AgentRuntimeConfig {
   jsonMode: boolean;
   timeoutMs: number;
   maxRetries: number;
+  /**
+   * 厂商专有的「思考模式」显式开关（仅 deepseek 系的 baseUrl 会把它写进请求体）。
+   * 不填 = 沿用网关默认（deepseek 下为关闭 —— 思考与正文共享 max_tokens，
+   * 默认关是 2026-10-07 三次空内容事故的修复）。填 'enabled' = 让模型先想再写：
+   * 任务链生成（长、需要规划）用它；别的小决策保持默认，快而省。
+   */
+  thinking?: 'enabled' | 'disabled';
 }
 
 export interface AgentStats {

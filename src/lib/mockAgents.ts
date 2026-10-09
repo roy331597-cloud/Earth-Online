@@ -78,7 +78,9 @@ export const mockDispatcherDecision = (idea: string): DispatcherDecision => {
     proposedClass: null,
     questShape: {
       kind: 'chain',
-      suggestedChainLength: 3,
+      // 8 = PO 2026-10-09 口径（建议 8~40，上限 60）的下沿；与 thunks 的
+      // directedDecision 取同一个数 —— 替身与真身对着同一把尺子说话。
+      suggestedChainLength: 8,
       suggestedType: 'side',
     },
     linkedGoalIds: entry?.linkedGoalIds ?? [],
